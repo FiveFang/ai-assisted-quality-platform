@@ -1,4 +1,4 @@
-# QA Platform
+# AI-assisted QA Platform
 
 AI-assisted QA platform that consumes requirement artifacts (PRDs, Jira stories, OpenAPI specs) and generates structured, automation-ready test scenarios — keeping humans in the review and approval loop.
 
