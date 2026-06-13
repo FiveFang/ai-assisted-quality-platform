@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import uuid
+import asyncio
+import json
 from typing import Any
 
+import asyncpg
 import structlog
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
+from pgvector.asyncpg import register_vector
 from sentence_transformers import SentenceTransformer
 
 from ..config import settings
@@ -15,29 +16,48 @@ logger = structlog.get_logger()
 
 class VectorStore:
     """
-    Qdrant-backed store for RAG context enrichment.
+    PostgreSQL + pgvector backed store for RAG context enrichment.
     Embeds requirements with sentence-transformers; retrieves by cosine similarity.
     """
 
     _VECTOR_SIZE = 384  # all-MiniLM-L6-v2 output dimension
 
     def __init__(self) -> None:
-        self._client = AsyncQdrantClient(
-            url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key,
-        )
         self._encoder = SentenceTransformer(settings.embedding_model)
-        self._collection = settings.qdrant_collection
+        self._table = settings.vector_table
+        self._pool: asyncpg.Pool | None = None
+        self._pool_lock = asyncio.Lock()
+
+    async def _get_pool(self) -> asyncpg.Pool:
+        if self._pool is not None:
+            return self._pool
+        async with self._pool_lock:
+            if self._pool is None:
+                self._pool = await asyncpg.create_pool(
+                    settings.database_url,
+                    init=register_vector,
+                )
+        return self._pool  # type: ignore[return-value]
 
     async def ensure_collection(self) -> None:
-        collections = await self._client.get_collections()
-        existing = {c.name for c in collections.collections}
-        if self._collection not in existing:
-            await self._client.create_collection(
-                collection_name=self._collection,
-                vectors_config=VectorParams(size=self._VECTOR_SIZE, distance=Distance.COSINE),
-            )
-            logger.info("vector_store.collection_created", collection=self._collection)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            await conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self._table} (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    requirement_id TEXT UNIQUE NOT NULL,
+                    tags TEXT[],
+                    payload JSONB NOT NULL,
+                    embedding VECTOR({self._VECTOR_SIZE})
+                )
+            """)
+            await conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS {self._table}_embedding_idx
+                ON {self._table} USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 100)
+            """)
+        logger.info("vector_store.collection_ensured", table=self._table)
 
     def _embed(self, text: str) -> list[float]:
         return self._encoder.encode(text).tolist()  # type: ignore[return-value]
@@ -48,12 +68,24 @@ class VectorStore:
         text: str,
         payload: dict[str, Any],
     ) -> None:
-        point = PointStruct(
-            id=str(uuid.uuid4()),
-            vector=self._embed(text),
-            payload={"requirement_id": requirement_id, **payload},
-        )
-        await self._client.upsert(collection_name=self._collection, points=[point])
+        pool = await self._get_pool()
+        embedding = self._embed(text)
+        tags = payload.get("tags", [])
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"""
+                INSERT INTO {self._table} (requirement_id, tags, payload, embedding)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (requirement_id) DO UPDATE
+                    SET tags = EXCLUDED.tags,
+                        payload = EXCLUDED.payload,
+                        embedding = EXCLUDED.embedding
+                """,
+                requirement_id,
+                tags,
+                json.dumps({"requirement_id": requirement_id, **payload}),
+                embedding,
+            )
 
     async def search_similar(
         self,
@@ -62,23 +94,31 @@ class VectorStore:
         score_threshold: float = 0.7,
         filter_tags: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        query_filter: Filter | None = None
+        pool = await self._get_pool()
+        embedding = self._embed(query_text)
+
+        tag_filter = "AND tags @> $4::text[]" if filter_tags else ""
+        params: list[Any] = [embedding, score_threshold, top_k]
         if filter_tags:
-            query_filter = Filter(
-                must=[
-                    FieldCondition(key="tags", match=MatchValue(value=tag))
-                    for tag in filter_tags
-                ]
+            params.append(filter_tags)
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT payload, 1 - (embedding <=> $1::vector) AS score
+                FROM {self._table}
+                WHERE 1 - (embedding <=> $1::vector) >= $2
+                {tag_filter}
+                ORDER BY score DESC
+                LIMIT $3
+                """,
+                *params,
             )
 
-        results = await self._client.search(
-            collection_name=self._collection,
-            query_vector=self._embed(query_text),
-            limit=top_k,
-            score_threshold=score_threshold,
-            query_filter=query_filter,
-        )
-        return [{"score": r.score, "payload": r.payload} for r in results]
+        return [
+            {"score": float(row["score"]), "payload": json.loads(row["payload"])}
+            for row in rows
+        ]
 
 
 vector_store = VectorStore()

@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from .routes import requirements, tests
+from ..infrastructure.vector_store import vector_store
 
 logger = structlog.get_logger()
 
@@ -26,6 +27,11 @@ app.include_router(requirements.router, prefix="/api/v1/requirements", tags=["re
 app.include_router(tests.router, prefix="/api/v1/tests", tags=["tests"])
 
 FastAPIInstrumentor.instrument_app(app)
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    await vector_store.ensure_collection()
 
 
 @app.get("/health")

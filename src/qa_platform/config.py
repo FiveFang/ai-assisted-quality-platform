@@ -20,9 +20,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
     default_model_tier: ModelTier = ModelTier.BALANCED
 
-    qdrant_url: str = Field(default="http://localhost:6333", alias="QDRANT_URL")
-    qdrant_api_key: str | None = Field(default=None, alias="QDRANT_API_KEY")
-    qdrant_collection: str = Field(default="qa_platform_requirements", alias="QDRANT_COLLECTION")
+    database_url: str = Field(
+        default="postgresql://postgres:postgres@localhost:5432/qa_platform",
+        alias="DATABASE_URL",
+    )
+    vector_table: str = Field(default="requirements_embeddings", alias="VECTOR_TABLE")
 
     temporal_host: str = Field(default="localhost:7233", alias="TEMPORAL_HOST")
     temporal_namespace: str = Field(default="qa-platform", alias="TEMPORAL_NAMESPACE")
