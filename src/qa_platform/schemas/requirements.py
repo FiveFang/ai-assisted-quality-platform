@@ -92,6 +92,7 @@ class Ambiguity(BaseModel):
 
 
 class EnrichedContext(BaseModel):
+    is_available: bool = True
     similar_requirements: list[dict[str, Any]] = Field(default_factory=list)
     relevant_domain_knowledge: list[str] = Field(default_factory=list)
     historical_test_patterns: list[str] = Field(default_factory=list)

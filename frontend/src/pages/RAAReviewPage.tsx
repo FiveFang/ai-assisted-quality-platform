@@ -342,11 +342,21 @@ export function RAAReviewPage() {
         <SkillPanel
           skillName="RAGEnricherSkill"
           label="RAG Context"
-          count={data.enriched_context.similar_requirements.length}
+          count={data.enriched_context.is_available ? data.enriched_context.similar_requirements.length : undefined}
         >
-          {data.enriched_context.similar_requirements.length === 0 &&
-          data.enriched_context.relevant_domain_knowledge.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No historical context found.</p>
+          {!data.enriched_context.is_available ? (
+            <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+              <div>
+                <p className="font-medium">Not enriched — Postgres unavailable</p>
+                <p className="text-xs mt-0.5 text-amber-700">
+                  Historical context and similar requirements are skipped. Start Postgres with pgvector to enable RAG enrichment.
+                </p>
+              </div>
+            </div>
+          ) : data.enriched_context.similar_requirements.length === 0 &&
+            data.enriched_context.relevant_domain_knowledge.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No historical context found — vector store is empty.</p>
           ) : (
             <div className="space-y-3">
               {data.enriched_context.similar_requirements.length > 0 && (

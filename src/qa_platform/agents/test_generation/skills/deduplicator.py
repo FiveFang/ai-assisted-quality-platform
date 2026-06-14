@@ -22,7 +22,12 @@ class DeduplicatorSkill:
     """
 
     def __init__(self) -> None:
-        self._encoder = SentenceTransformer(settings.embedding_model)
+        self._encoder: SentenceTransformer | None = None
+
+    def _get_encoder(self) -> SentenceTransformer:
+        if self._encoder is None:
+            self._encoder = SentenceTransformer(settings.embedding_model)
+        return self._encoder
 
     async def execute(self, test_cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if len(test_cases) < 2:
@@ -34,7 +39,7 @@ class DeduplicatorSkill:
             f"{tc.get('title', '')} {tc.get('description', '')}"
             for tc in test_cases
         ]
-        embeddings = self._encoder.encode(texts)
+        embeddings = self._get_encoder().encode(texts)
         sim_matrix = cosine_similarity(embeddings)
 
         duplicate_of: dict[int, int] = {}

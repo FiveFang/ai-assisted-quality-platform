@@ -31,7 +31,11 @@ FastAPIInstrumentor.instrument_app(app)
 
 @app.on_event("startup")
 async def startup() -> None:
-    await vector_store.ensure_collection()
+    try:
+        await vector_store.ensure_collection()
+    except Exception as exc:
+        logger.warning("vector_store.unavailable", error=str(exc),
+                       detail="RAG enrichment will be skipped until Postgres is available")
 
 
 @app.get("/health")

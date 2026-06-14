@@ -23,10 +23,15 @@ class VectorStore:
     _VECTOR_SIZE = 384  # all-MiniLM-L6-v2 output dimension
 
     def __init__(self) -> None:
-        self._encoder = SentenceTransformer(settings.embedding_model)
+        self._encoder: SentenceTransformer | None = None
         self._table = settings.vector_table
         self._pool: asyncpg.Pool | None = None
         self._pool_lock = asyncio.Lock()
+
+    def _get_encoder(self) -> SentenceTransformer:
+        if self._encoder is None:
+            self._encoder = SentenceTransformer(settings.embedding_model)
+        return self._encoder
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is not None:
@@ -60,7 +65,7 @@ class VectorStore:
         logger.info("vector_store.collection_ensured", table=self._table)
 
     def _embed(self, text: str) -> list[float]:
-        return self._encoder.encode(text).tolist()  # type: ignore[return-value]
+        return self._get_encoder().encode(text).tolist()  # type: ignore[return-value]
 
     async def upsert_requirement(
         self,

@@ -74,6 +74,7 @@ export interface Ambiguity {
 }
 
 export interface EnrichedContext {
+  is_available: boolean
   similar_requirements: Array<{
     requirement_id?: string
     similarity?: number
