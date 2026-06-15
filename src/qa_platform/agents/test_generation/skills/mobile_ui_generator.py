@@ -16,7 +16,7 @@ For mobile tests use Appium conventions; for web tests use Playwright convention
 Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate UI/mobile test cases from these workflows:
+Generate up to 5 UI/mobile test cases from these workflows:
 
 Workflows: {workflows}
 Requirements tagged UI/mobile: {ui_requirements}

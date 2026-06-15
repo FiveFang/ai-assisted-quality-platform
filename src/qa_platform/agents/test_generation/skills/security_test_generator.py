@@ -25,7 +25,7 @@ Each test case asserts that a defense WORKS, e.g. "verify 401 is returned on exp
 Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate security-focused test cases for:
+Generate up to 5 security-focused test cases for:
 
 Requirements: {requirements}
 API contracts: {api_contracts}

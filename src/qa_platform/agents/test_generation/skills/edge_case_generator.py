@@ -22,7 +22,7 @@ behavior at boundaries and under unusual-but-valid conditions. Focus on:
 Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate edge case test cases for:
+Generate up to 4 edge case test cases for:
 
 Requirement: {requirement}
 Business rules: {rules}

@@ -16,7 +16,7 @@ and schema validation tests. Use the request/response schemas to generate precis
 Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate API test cases for this endpoint:
+Generate up to 5 API test cases for this endpoint:
 
 {endpoint}
 

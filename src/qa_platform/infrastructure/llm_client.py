@@ -264,21 +264,38 @@ class LLMClient:
             LLMProvider.GEMINI: _GeminiProvider,
         }
 
-    def _try_repair_json(self, raw: str) -> str | None:
+    def _try_repair_json(self, raw: str, error_pos: int = 0) -> str | None:
         """
-        Attempt to salvage truncated/malformed JSON by finding the last complete
-        object or array. Looks backwards from the end to find matching braces.
+        Attempt to salvage truncated/malformed JSON.
+
+        Two strategies:
+        1. If error is mid-string (not at end): truncate before the error then
+           search backwards for the last valid closing brace/bracket.
+        2. Search backwards from the end (handles end-truncation).
         """
-        # Try to find a complete JSON object {} or array []
-        for end_pos in range(len(raw) - 1, max(0, len(raw) - 1000), -1):
+        # Strategy 1: truncate at error position and scan backwards from there
+        # (handles mid-string syntax errors where content continues past the error)
+        search_start = error_pos if error_pos > 0 else len(raw) - 1
+        search_end = max(0, search_start - 10_000)
+        for end_pos in range(search_start, search_end, -1):
             if raw[end_pos] in ('}', ']'):
-                # Try to parse from start to this position
                 candidate = raw[:end_pos + 1]
                 try:
                     json.loads(candidate)
                     return candidate
                 except json.JSONDecodeError:
                     continue
+
+        # Strategy 2: scan backwards from the very end (handles end-truncation)
+        if error_pos > 0:
+            for end_pos in range(len(raw) - 1, search_start, -1):
+                if raw[end_pos] in ('}', ']'):
+                    candidate = raw[:end_pos + 1]
+                    try:
+                        json.loads(candidate)
+                        return candidate
+                    except json.JSONDecodeError:
+                        continue
         return None
 
     def _get_provider(self, provider: LLMProvider) -> _Provider:
@@ -352,7 +369,7 @@ class LLMClient:
             )
 
             # Try to salvage what we can: find the last complete JSON object/array
-            repaired = self._try_repair_json(raw)
+            repaired = self._try_repair_json(raw, error_pos=error_pos)
             if repaired is not None:
                 logger.info("llm.json_repaired", original_length=len(raw), repaired_length=len(repaired))
                 try:

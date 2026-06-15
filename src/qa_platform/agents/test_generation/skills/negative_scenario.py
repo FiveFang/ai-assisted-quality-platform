@@ -15,7 +15,7 @@ handles invalid inputs, unauthorized access, state violations, and missing requi
 Each case must specify the expected error behavior. Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate negative test cases for this requirement:
+Generate up to 4 negative test cases for this requirement:
 
 Requirement: {requirement}
 
