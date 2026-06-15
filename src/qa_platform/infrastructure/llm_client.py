@@ -264,6 +264,23 @@ class LLMClient:
             LLMProvider.GEMINI: _GeminiProvider,
         }
 
+    def _try_repair_json(self, raw: str) -> str | None:
+        """
+        Attempt to salvage truncated/malformed JSON by finding the last complete
+        object or array. Looks backwards from the end to find matching braces.
+        """
+        # Try to find a complete JSON object {} or array []
+        for end_pos in range(len(raw) - 1, max(0, len(raw) - 1000), -1):
+            if raw[end_pos] in ('}', ']'):
+                # Try to parse from start to this position
+                candidate = raw[:end_pos + 1]
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except json.JSONDecodeError:
+                    continue
+        return None
+
     def _get_provider(self, provider: LLMProvider) -> _Provider:
         if provider not in self._providers:
             self._providers[provider] = self._factories[provider]()
@@ -314,7 +331,35 @@ class LLMClient:
         try:
             return json.loads(raw)  # type: ignore[no-any-return]
         except json.JSONDecodeError as exc:
-            logger.error("llm.json_parse_error", error=str(exc), raw_length=len(raw))
+            # Log the error location and a sample of the malformed JSON
+            error_line = exc.lineno or 1
+            error_col = exc.colno or 1
+            error_pos = exc.pos or 0
+
+            # Extract a window around the error for debugging
+            window_start = max(0, error_pos - 200)
+            window_end = min(len(raw), error_pos + 200)
+            error_context = raw[window_start:window_end]
+
+            logger.error(
+                "llm.json_parse_error",
+                error=str(exc),
+                raw_length=len(raw),
+                error_line=error_line,
+                error_col=error_col,
+                error_pos=error_pos,
+                error_context=error_context,
+            )
+
+            # Try to salvage what we can: find the last complete JSON object/array
+            repaired = self._try_repair_json(raw)
+            if repaired is not None:
+                logger.info("llm.json_repaired", original_length=len(raw), repaired_length=len(repaired))
+                try:
+                    return json.loads(repaired)  # type: ignore[no-any-return]
+                except json.JSONDecodeError:
+                    pass  # Fall through to the error below
+
             raise ValueError(f"AI returned malformed JSON (output may have been truncated): {exc}") from exc
 
 
