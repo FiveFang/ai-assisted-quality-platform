@@ -39,6 +39,24 @@ async def generate_tests(request: GenerateRequest) -> TestSuite:
         )
 
     normalized = NormalizedRequirement.model_validate(data)
+
+    # Strip rejected items before handing off to TGA
+    rejected_ids = set(normalized.rejected_requirements.keys())
+    if rejected_ids:
+        normalized = normalized.model_copy(update={
+            "requirements": [r for r in normalized.requirements if r.requirement_id not in rejected_ids],
+        })
+        logger.info(
+            "generate_tests.skipping_rejected",
+            count=len(rejected_ids),
+            remaining=len(normalized.requirements),
+        )
+    if not normalized.requirements:
+        raise HTTPException(
+            status_code=422,
+            detail="All requirements have been rejected — nothing to generate tests for.",
+        )
+
     suite = await _tga.process(normalized)
     await state_store.set(f"test_suite:{suite.test_suite_id}", suite.model_dump(mode="json"))
     await state_store.set(

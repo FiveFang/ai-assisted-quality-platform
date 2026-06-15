@@ -25,7 +25,14 @@ import structlog
 
 from ...config import settings
 from ...schemas.common import ProcessingStatus
-from ...schemas.requirements import NormalizedRequirement, ProcessingMetadata, RequirementSource
+from ...schemas.requirements import (
+    Ambiguity,
+    BusinessRule,
+    NormalizedRequirement,
+    ProcessingMetadata,
+    RequirementSource,
+    Workflow,
+)
 from .skills.ambiguity_detector import AmbiguityDetectorSkill
 from .skills.confidence_scorer import ConfidenceScorerSkill
 from .skills.entity_extractor import EntityExtractorSkill
@@ -203,6 +210,98 @@ class RequirementAnalysisAgent:
             human_review_required=human_review_required,
             skills_failed=len(skill_warnings),
             duration_ms=duration_ms,
+        )
+        return result
+
+    async def rerun_skill(
+        self,
+        skill_key: str,
+        requirement: NormalizedRequirement,
+        max_tokens: int | None = None,
+    ) -> NormalizedRequirement:
+        """Re-run a single non-critical skill and patch the stored result in-place."""
+        RERUNNABLE = {"ambiguity_detector", "rule_extractor", "workflow_extractor"}
+        if skill_key not in RERUNNABLE:
+            raise ValueError(f"Skill '{skill_key}' cannot be re-run (inputs not stored for this skill)")
+
+        SKILL_CLASS_MAP = {
+            "ambiguity_detector": "AmbiguityDetectorSkill",
+            "rule_extractor": "RuleExtractorSkill",
+            "workflow_extractor": "WorkflowExtractorSkill",
+        }
+        skill_class = SKILL_CLASS_MAP[skill_key]
+        log = logger.bind(requirement_id=requirement.requirement_id, skill=skill_class)
+        log.info("raa.rerun_skill.start")
+
+        # Convert stored Pydantic objects to plain dicts for skill input
+        reqs_dicts = [r.model_dump(mode="json") for r in requirement.requirements]
+        rules_dicts = [r.model_dump(mode="json") for r in requirement.business_rules]
+
+        if skill_key == "ambiguity_detector":
+            new_ambiguities = await self._ambiguity_detector.execute(reqs_dicts, rules_dicts, max_tokens=max_tokens)
+            requirement = requirement.model_copy(update={
+                "ambiguities": [Ambiguity.model_validate(a) for a in new_ambiguities],
+            })
+        elif skill_key == "rule_extractor":
+            new_rules = await self._rule_extractor.execute(reqs_dicts, max_tokens=max_tokens)
+            requirement = requirement.model_copy(update={
+                "business_rules": [BusinessRule.model_validate(r) for r in new_rules],
+            })
+            rules_dicts = new_rules
+        elif skill_key == "workflow_extractor":
+            new_workflows = await self._workflow_extractor.execute(reqs_dicts, max_tokens=max_tokens)
+            requirement = requirement.model_copy(update={
+                "workflows": [Workflow.model_validate(w) for w in new_workflows],
+            })
+
+        # Re-score confidence with updated data
+        try:
+            confidence = await self._confidence_scorer.execute(
+                requirements=reqs_dicts,
+                workflows=[w.model_dump(mode="json") for w in requirement.workflows],
+                rules=[r.model_dump(mode="json") for r in requirement.business_rules],
+                entities={"entities": [e.model_dump(mode="json") for e in requirement.entities]},
+                ambiguities=[a.model_dump(mode="json") for a in requirement.ambiguities],
+            )
+        except Exception:
+            confidence = requirement.metadata.confidence_score
+
+        # Remove this skill's failure from review_reasons; keep any other reasons
+        clean_reasons = [
+            r for r in requirement.review_reasons
+            if not r.startswith(f"{skill_class} failed:")
+        ]
+
+        # Ensure the skill is listed as executed
+        executed = list(requirement.metadata.skills_executed)
+        if skill_class not in executed:
+            executed.append(skill_class)
+
+        # Re-evaluate escalation against updated ambiguities
+        ambiguities_dicts = [a.model_dump(mode="json") for a in requirement.ambiguities]
+        human_review, escalation_reasons = self._evaluate_escalation(confidence, ambiguities_dicts)
+        final_reasons = [*escalation_reasons, *clean_reasons]
+        if final_reasons:
+            human_review = True
+
+        updated_metadata = requirement.metadata.model_copy(update={
+            "confidence_score": confidence,
+            "skills_executed": executed,
+        })
+        result = requirement.model_copy(update={
+            "metadata": updated_metadata,
+            "human_review_required": human_review,
+            "review_reasons": final_reasons,
+            "status": (
+                ProcessingStatus.AWAITING_REVIEW if human_review else ProcessingStatus.APPROVED
+            ),
+        })
+
+        log.info(
+            "raa.rerun_skill.complete",
+            skill=skill_class,
+            new_confidence=confidence,
+            human_review_required=human_review,
         )
         return result
 

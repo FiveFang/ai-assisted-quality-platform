@@ -55,4 +55,22 @@ export const api = {
       `/tests/${id}/review`,
       { method: 'POST', body: JSON.stringify({ approved, reason }) },
     ),
+
+  rerunSkill: (requirementId: string, skillKey: string) =>
+    apiFetch<NormalizedRequirement>(
+      `/requirements/${requirementId}/rerun/${skillKey}`,
+      { method: 'POST' },
+    ),
+
+  rejectRequirement: (nrId: string, reqId: string, reason?: string) =>
+    apiFetch<{ requirement_id: string; item_id: string; status: string }>(
+      `/requirements/${nrId}/items/${reqId}/reject`,
+      { method: 'POST', body: JSON.stringify({ reason: reason ?? null }) },
+    ),
+
+  unrejectRequirement: (nrId: string, reqId: string) =>
+    apiFetch<{ requirement_id: string; item_id: string; status: string }>(
+      `/requirements/${nrId}/items/${reqId}/reject`,
+      { method: 'DELETE' },
+    ),
 }

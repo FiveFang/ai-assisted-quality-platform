@@ -35,6 +35,10 @@ class ReviewSignal(BaseModel):
     reason: str | None = None
 
 
+class RejectItemRequest(BaseModel):
+    reason: str | None = None
+
+
 class RequirementSummary(BaseModel):
     requirement_id: str
     reference: str
@@ -160,6 +164,81 @@ async def get_test_suite_for_requirement(requirement_id: str) -> dict[str, str]:
     if not ref:
         raise HTTPException(status_code=404, detail="No test suite generated for this requirement")
     return ref
+
+
+@router.post("/{requirement_id}/items/{item_id}/reject")
+async def reject_requirement_item(
+    requirement_id: str, item_id: str, body: RejectItemRequest
+) -> dict[str, str]:
+    """Mark a single extracted requirement as rejected. Rejected items are skipped by TGA."""
+    data = await state_store.get(f"normalized_requirement:{requirement_id}")
+    if not data:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    item_ids = {r["requirement_id"] for r in data.get("requirements", [])}
+    if item_id not in item_ids:
+        raise HTTPException(status_code=404, detail=f"Requirement item '{item_id}' not found")
+
+    rejected = dict(data.get("rejected_requirements", {}))
+    rejected[item_id] = body.reason
+    data["rejected_requirements"] = rejected
+    await state_store.set(f"normalized_requirement:{requirement_id}", data)
+    await review_store.insert(
+        entity_key=f"normalized_requirement:{requirement_id}",
+        entity_type="requirement_item",
+        entity_id=item_id,
+        approved=False,
+        reason=body.reason,
+    )
+    logger.info("requirement_item.rejected", requirement_id=requirement_id, item_id=item_id)
+    return {"requirement_id": requirement_id, "item_id": item_id, "status": "rejected"}
+
+
+@router.delete("/{requirement_id}/items/{item_id}/reject")
+async def unreject_requirement_item(requirement_id: str, item_id: str) -> dict[str, str]:
+    """Remove the rejection on a single extracted requirement."""
+    data = await state_store.get(f"normalized_requirement:{requirement_id}")
+    if not data:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    rejected = dict(data.get("rejected_requirements", {}))
+    rejected.pop(item_id, None)
+    data["rejected_requirements"] = rejected
+    await state_store.set(f"normalized_requirement:{requirement_id}", data)
+    await review_store.insert(
+        entity_key=f"normalized_requirement:{requirement_id}",
+        entity_type="requirement_item",
+        entity_id=item_id,
+        approved=True,
+        reason="Rejection reversed",
+    )
+    logger.info("requirement_item.unrejected", requirement_id=requirement_id, item_id=item_id)
+    return {"requirement_id": requirement_id, "item_id": item_id, "status": "active"}
+
+
+@router.post("/{requirement_id}/rerun/{skill_key}", response_model=NormalizedRequirement)
+async def rerun_skill(requirement_id: str, skill_key: str) -> NormalizedRequirement:
+    """Re-run a single failed skill without re-processing the entire pipeline."""
+    data = await state_store.get(f"normalized_requirement:{requirement_id}")
+    if not data:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    valid_skills = {"ambiguity_detector", "rule_extractor", "workflow_extractor"}
+    if skill_key not in valid_skills:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skill '{skill_key}' cannot be re-run. Valid options: {', '.join(sorted(valid_skills))}",
+        )
+
+    requirement = NormalizedRequirement.model_validate(data)
+    try:
+        result = await _raa.rerun_skill(skill_key=skill_key, requirement=requirement)
+    except Exception as exc:
+        logger.exception("rerun_skill.failed", skill_key=skill_key, requirement_id=requirement_id, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Skill re-run failed: {exc}")
+
+    await state_store.set(f"normalized_requirement:{requirement_id}", result.model_dump(mode="json"))
+    return result
 
 
 @router.get("/{requirement_id}", response_model=NormalizedRequirement)

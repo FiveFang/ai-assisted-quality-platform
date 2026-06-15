@@ -128,3 +128,4 @@ class NormalizedRequirement(BaseModel):
 
     human_review_required: bool = False
     review_reasons: list[str] = Field(default_factory=list)
+    rejected_requirements: dict[str, str | None] = Field(default_factory=dict)

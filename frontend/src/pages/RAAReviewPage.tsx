@@ -3,7 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import useSWR from 'swr'
 import {
   Loader2, AlertTriangle, CheckCircle2, XCircle, ChevronLeft,
-  History, FlaskConical, Shield, Layers, GitBranch, Database, BarChart2,
+  History, FlaskConical, Shield, Layers, GitBranch, Database, BarChart2, Ban,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -63,21 +63,108 @@ const SEVERITY_VARIANT: Record<string, 'danger' | 'warning' | 'info' | 'secondar
   BLOCKING: 'danger', HIGH: 'warning', MEDIUM: 'info', LOW: 'secondary',
 }
 
-function RequirementItem({ req }: { req: Requirement }) {
+function RequirementItem({ req, isRejected, rejectionReason, onReject, onUnreject }: {
+  req: Requirement
+  isRejected: boolean
+  rejectionReason: string | null
+  onReject: (reason?: string) => Promise<void>
+  onUnreject: () => Promise<void>
+}) {
   const [open, setOpen] = useState(false)
+  const [rejecting, setRejecting] = useState(false)
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const confirmReject = async () => {
+    setBusy(true)
+    try { await onReject(reason.trim() || undefined) }
+    finally { setBusy(false); setRejecting(false); setReason('') }
+  }
+
+  const confirmUnreject = async () => {
+    setBusy(true)
+    try { await onUnreject() }
+    finally { setBusy(false) }
+  }
+
   return (
-    <div className="rounded-xl border bg-background p-3.5 space-y-2 transition-shadow hover:shadow-sm">
+    <div className={[
+      'rounded-xl border bg-background p-3.5 space-y-2 transition-all',
+      isRejected ? 'border-red-200 bg-red-50/30 opacity-60' : 'hover:shadow-sm',
+    ].join(' ')}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-mono text-[11px] text-muted-foreground">{req.requirement_id}</span>
+          <span className={['font-mono text-[11px] text-muted-foreground', isRejected ? 'line-through' : ''].join(' ')}>
+            {req.requirement_id}
+          </span>
           <Badge variant={PRIORITY_VARIANT[req.priority] ?? 'secondary'}>{req.priority}</Badge>
           <Badge variant={TYPE_VARIANT[req.type] ?? 'secondary'}>{req.type}</Badge>
+          {isRejected && <Badge variant="danger">Rejected</Badge>}
         </div>
-        <button onClick={() => setOpen((v) => !v)} className="text-xs text-muted-foreground hover:text-foreground shrink-0">
-          {open ? 'less' : 'more'}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {isRejected ? (
+            <button
+              onClick={confirmUnreject}
+              disabled={busy}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="h-3 w-3 animate-spin inline" /> : 'Undo'}
+            </button>
+          ) : (
+            <button
+              onClick={() => setRejecting((v) => !v)}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive transition-colors"
+            >
+              <Ban className="h-3 w-3" /> Reject
+            </button>
+          )}
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="text-xs text-muted-foreground hover:text-foreground shrink-0"
+          >
+            {open ? 'less' : 'more'}
+          </button>
+        </div>
       </div>
-      <p className="text-sm font-medium leading-snug">{req.title}</p>
+
+      <p className={['text-sm font-medium leading-snug', isRejected ? 'line-through text-muted-foreground' : ''].join(' ')}>
+        {req.title}
+      </p>
+
+      {isRejected && rejectionReason && (
+        <p className="text-xs text-destructive/70 italic">Reason: {rejectionReason}</p>
+      )}
+
+      {rejecting && !isRejected && (
+        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-2">
+          <Textarea
+            placeholder="Rejection reason (optional)…"
+            rows={2}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            className="resize-none text-xs"
+          />
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => { setRejecting(false); setReason('') }}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={confirmReject}
+              disabled={busy}
+              className="h-7 px-3 text-xs"
+            >
+              {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Confirm reject'}
+            </Button>
+          </div>
+        </div>
+      )}
+
       {open && (
         <div className="space-y-2.5 pt-1">
           <p className="text-xs text-muted-foreground leading-relaxed">{req.description}</p>
@@ -186,6 +273,7 @@ export function RAAReviewPage() {
   const navigate = useNavigate()
   const [rejectReason, setRejectReason] = useState('')
   const [submitting, setSubmitting] = useState<'approve' | 'reject' | 'generate' | null>(null)
+  const [retrying, setRetrying] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   const { data, error, isLoading, mutate } = useSWR<NormalizedRequirement>(
@@ -242,6 +330,45 @@ export function RAAReviewPage() {
       const suite = await api.generateTests(data.requirement_id)
       navigate(`/tests/${suite.test_suite_id}`)
     } catch (err) { setActionError(err instanceof Error ? err.message : 'Failed'); setSubmitting(null) }
+  }
+
+  // Parse which skills failed from review_reasons (e.g. "AmbiguityDetectorSkill failed: ...")
+  const failedSkillClasses = new Set(
+    (data?.review_reasons ?? [])
+      .map((r) => { const m = r.match(/^(\w+Skill) failed:/); return m ? m[1] : null })
+      .filter(Boolean) as string[]
+  )
+
+  const SKILL_CLASS_TO_KEY: Record<string, string> = {
+    AmbiguityDetectorSkill: 'ambiguity_detector',
+    RuleExtractorSkill: 'rule_extractor',
+    WorkflowExtractorSkill: 'workflow_extractor',
+  }
+
+  const handleRejectRequirement = async (reqId: string, reason?: string) => {
+    await api.rejectRequirement(data.requirement_id, reqId, reason)
+    await mutate()
+  }
+
+  const handleUnrejectRequirement = async (reqId: string) => {
+    await api.unrejectRequirement(data.requirement_id, reqId)
+    await mutate()
+  }
+
+  const rejectedIds = data.rejected_requirements ?? {}
+  const rejectedCount = Object.keys(rejectedIds).length
+
+  const handleRerunSkill = async (skillKey: string) => {
+    if (!data) return
+    setRetrying(skillKey); setActionError(null)
+    try {
+      await api.rerunSkill(data.requirement_id, skillKey)
+      await mutate()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Retry failed')
+    } finally {
+      setRetrying(null)
+    }
   }
 
   return (
@@ -317,25 +444,62 @@ export function RAAReviewPage() {
         <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground px-1">Agent output</p>
 
         <SkillPanel skillName="RequirementExtractorSkill" label="Extracted Requirements" count={data.requirements.length} defaultOpen>
+          {rejectedCount > 0 && (
+            <p className="text-xs text-muted-foreground flex items-center gap-1.5 pb-1">
+              <Ban className="h-3 w-3 text-destructive/60 shrink-0" />
+              {rejectedCount} of {data.requirements.length} rejected — won't generate test cases
+            </p>
+          )}
           {data.requirements.length === 0
             ? <p className="text-sm text-muted-foreground">No requirements extracted.</p>
-            : data.requirements.map((req) => <RequirementItem key={req.requirement_id} req={req} />)
+            : data.requirements.map((req) => (
+                <RequirementItem
+                  key={req.requirement_id}
+                  req={req}
+                  isRejected={req.requirement_id in rejectedIds}
+                  rejectionReason={rejectedIds[req.requirement_id] ?? null}
+                  onReject={(reason) => handleRejectRequirement(req.requirement_id, reason)}
+                  onUnreject={() => handleUnrejectRequirement(req.requirement_id)}
+                />
+              ))
           }
         </SkillPanel>
 
-        <SkillPanel skillName="AmbiguityDetectorSkill" label="Ambiguities" count={data.ambiguities.length} defaultOpen={data.ambiguities.length > 0}>
-          {data.ambiguities.length === 0
-            ? <p className="text-sm text-muted-foreground flex items-center gap-1.5">
-                <CheckCircle2 className="h-4 w-4 text-emerald-500" /> No ambiguities detected.
+        <SkillPanel
+          skillName="AmbiguityDetectorSkill"
+          label="Ambiguities"
+          count={data.ambiguities.length}
+          defaultOpen={data.ambiguities.length > 0 || failedSkillClasses.has('AmbiguityDetectorSkill')}
+          onRetry={failedSkillClasses.has('AmbiguityDetectorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['AmbiguityDetectorSkill']) : undefined}
+          retrying={retrying === SKILL_CLASS_TO_KEY['AmbiguityDetectorSkill']}
+        >
+          {failedSkillClasses.has('AmbiguityDetectorSkill') && data.ambiguities.length === 0
+            ? <p className="text-sm text-destructive/80 flex items-center gap-1.5">
+                <XCircle className="h-4 w-4 text-destructive shrink-0" /> Detection failed — use Retry to re-run without re-analyzing everything.
               </p>
-            : data.ambiguities.map((a) => <AmbiguityItem key={a.ambiguity_id} amb={a} />)
+            : data.ambiguities.length === 0
+              ? <p className="text-sm text-muted-foreground flex items-center gap-1.5">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" /> No ambiguities detected.
+                </p>
+              : data.ambiguities.map((a) => <AmbiguityItem key={a.ambiguity_id} amb={a} />)
           }
         </SkillPanel>
 
-        <SkillPanel skillName="WorkflowExtractorSkill" label="Workflows" count={data.workflows.length}>
-          {data.workflows.length === 0
-            ? <p className="text-sm text-muted-foreground">No workflows extracted.</p>
-            : data.workflows.map((wf) => <WorkflowItem key={wf.workflow_id} wf={wf} />)
+        <SkillPanel
+          skillName="WorkflowExtractorSkill"
+          label="Workflows"
+          count={data.workflows.length}
+          defaultOpen={failedSkillClasses.has('WorkflowExtractorSkill')}
+          onRetry={failedSkillClasses.has('WorkflowExtractorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['WorkflowExtractorSkill']) : undefined}
+          retrying={retrying === SKILL_CLASS_TO_KEY['WorkflowExtractorSkill']}
+        >
+          {failedSkillClasses.has('WorkflowExtractorSkill') && data.workflows.length === 0
+            ? <p className="text-sm text-destructive/80 flex items-center gap-1.5">
+                <XCircle className="h-4 w-4 text-destructive shrink-0" /> Extraction failed — use Retry to re-run without re-analyzing everything.
+              </p>
+            : data.workflows.length === 0
+              ? <p className="text-sm text-muted-foreground">No workflows extracted.</p>
+              : data.workflows.map((wf) => <WorkflowItem key={wf.workflow_id} wf={wf} />)
           }
         </SkillPanel>
 
@@ -348,10 +512,21 @@ export function RAAReviewPage() {
           }
         </SkillPanel>
 
-        <SkillPanel skillName="RuleExtractorSkill" label="Business Rules" count={data.business_rules.length}>
-          {data.business_rules.length === 0
-            ? <p className="text-sm text-muted-foreground">No business rules extracted.</p>
-            : data.business_rules.map((r) => <RuleItem key={r.rule_id} rule={r} />)
+        <SkillPanel
+          skillName="RuleExtractorSkill"
+          label="Business Rules"
+          count={data.business_rules.length}
+          defaultOpen={failedSkillClasses.has('RuleExtractorSkill')}
+          onRetry={failedSkillClasses.has('RuleExtractorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['RuleExtractorSkill']) : undefined}
+          retrying={retrying === SKILL_CLASS_TO_KEY['RuleExtractorSkill']}
+        >
+          {failedSkillClasses.has('RuleExtractorSkill') && data.business_rules.length === 0
+            ? <p className="text-sm text-destructive/80 flex items-center gap-1.5">
+                <XCircle className="h-4 w-4 text-destructive shrink-0" /> Extraction failed — use Retry to re-run without re-analyzing everything.
+              </p>
+            : data.business_rules.length === 0
+              ? <p className="text-sm text-muted-foreground">No business rules extracted.</p>
+              : data.business_rules.map((r) => <RuleItem key={r.rule_id} rule={r} />)
           }
         </SkillPanel>
 

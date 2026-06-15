@@ -108,6 +108,7 @@ export interface NormalizedRequirement {
   enriched_context: EnrichedContext
   human_review_required: boolean
   review_reasons: string[]
+  rejected_requirements: Record<string, string | null>
 }
 
 export interface TestStep {
