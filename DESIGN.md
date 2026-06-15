@@ -23,6 +23,10 @@
    - [Modular vs Single-Agent](#61-modular-vs-single-agent-tradeoff)
    - [Risks and Mitigations](#62-risks-and-mitigations)
    - [Incremental Rollout](#63-incremental-rollout)
+7. [Data Model](#7-data-model)
+   - [State Store](#71-state-store-platform_state)
+   - [Vector Store](#72-vector-store-requirements_embeddings)
+   - [Local Dev Setup](#73-local-dev-setup)
 
 ---
 
@@ -30,7 +34,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                     FastAPI Gateway (:8000)                       │
+│                     FastAPI Gateway (:8001)                       │
 │  POST /requirements/analyze    POST /tests/generate              │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
@@ -47,10 +51,12 @@
                │                │
    ┌───────────┼────────────────┼──────────────┐
    │           │                │              │
-┌──▼──┐  ┌────▼────┐     ┌─────▼────┐  ┌─────▼──┐
-│ LLM │  │ Qdrant  │     │ Temporal │  │ OTel   │
-│Client│  │ (RAG)  │     │  State   │  │  Obs.  │
-└─────┘  └─────────┘     └──────────┘  └────────┘
+┌──▼──┐  ┌────▼──────────────┐  ┌─────▼──┐
+│ LLM │  │   PostgreSQL 16+  │  │ OTel   │
+│Client│  │  pgvector (RAG)  │  │  Obs.  │
+└─────┘  │  platform_state   │  └────────┘
+         │  (results store)  │
+         └───────────────────┘
 ```
 
 **Design principles:**
@@ -80,7 +86,7 @@ Input Artifacts (PRD / Jira / OpenAPI)
                               │
     ┌──── [parallel] ──────────────────────────────────────────────┐
     │  WorkflowExtractor  RuleExtractor  EntityExtractor  RAGEnricher│
-    │  (BALANCED)         (BALANCED)     (BALANCED)       (Qdrant)   │
+    │  (BALANCED)         (BALANCED)     (BALANCED)       (pgvector) │
     └──────────────────────────────────────────────────────────────┘
                               │
                    AmbiguityDetectorSkill
@@ -381,13 +387,13 @@ Input Artifacts (PRD / Jira / OpenAPI)
 #### RAG Context Enrichment Skill
 **File:** `agents/requirement_analysis/skills/rag_enricher.py`
 
-**Responsibility:** Retrieve semantically similar historical requirements and their associated test outcomes from the Qdrant vector store.
+**Responsibility:** Retrieve semantically similar historical requirements and their associated test outcomes from the PostgreSQL + pgvector store.
 
 **Retrieval strategy:**
 1. Embed each requirement title+description using `all-MiniLM-L6-v2` (384 dimensions)
-2. Cosine similarity search against the `qa_platform_requirements` collection
+2. Cosine similarity search via pgvector `<=>` operator (cosine distance)
 3. `score_threshold=0.7`, top-5 results per requirement
-4. Optional tag-based pre-filter for domain scoping
+4. Optional tag-based pre-filter for domain scoping (`tags @> $tags`)
 
 **Output:**
 ```json
@@ -751,7 +757,7 @@ Workflow completes with final status
 
 **Why Temporal:** If the process crashes mid-pipeline, Temporal replays from the last successful activity. For a 10–20 minute LLM pipeline, durable execution is non-negotiable. The alternative (stateless HTTP + database polling) adds operational complexity without the replay guarantee.
 
-**Running without Temporal (dev/test):** The `InMemoryStateStore` acts as a simple key-value store. The API routes call agents directly and store results without workflow orchestration. State does not survive process restarts.
+**Running without Temporal (dev/test):** The API routes call agents directly and store results in Postgres via `StateStore`. State survives restarts. If Postgres is also unavailable, `InMemoryStateStore` is used as a last-resort fallback — results are lost on restart.
 
 ### 4.2 Model Routing Strategy
 
@@ -1078,12 +1084,109 @@ The canonical output contract of the TGA.
 |------|--------|-----------|
 | LLM hallucination in requirement extraction | Wrong tests, false confidence | Confidence gate (0.75) + human review; ambiguity detection catches most hallucinated requirements |
 | Test case explosion (too many generated cases) | Reviewer fatigue | Deduplication skill + risk-based prioritization — only P0/P1 get scaffolds |
-| Stale RAG context from outdated requirements | Historical patterns mislead current analysis | TTL on Qdrant vectors (evict after 6 months); score_threshold=0.7 prevents weak matches |
+| Stale RAG context from outdated requirements | Historical patterns mislead current analysis | Periodic DELETE on `requirements_embeddings` rows older than 6 months; `score_threshold=0.7` prevents weak matches |
 | Temporal workflow gets stuck in signal wait | Pipeline blocked indefinitely | 7-day timeout on human review signals; fallback alert to oncall |
 | Cost overrun from POWERFUL tier | Budget impact | Model routing — only 2 skills use opus (RequirementExtractor, EdgeCaseGenerator) |
 | High confidence score, wrong output | Missed review gate | Human review always ON for first N runs per team; review rate configurable |
 | Broken schema between RAA and TGA | Runtime failures | Pydantic v2 validates at assembly time; FAILED status prevents propagation |
 | LLM output contains non-JSON prose | Parsing failure | LLMClient strips markdown fences; single retry on parse failure before raising |
+
+---
+
+## 7. Data Model
+
+Both agents share a single PostgreSQL 16+ instance. The database has two purposes:
+1. **State persistence** — durable storage for pipeline results (`platform_state`)
+2. **RAG vector search** — embedding-based requirement retrieval (`requirements_embeddings`)
+
+### 7.1 State Store (`platform_state`)
+
+A generic JSONB key-value table. All pipeline outputs are serialized as JSON and stored here, keyed by a namespaced prefix.
+
+```sql
+CREATE TABLE platform_state (
+    key        TEXT PRIMARY KEY,
+    value      JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Fast lookup by type (all requirements, all test suites)
+CREATE INDEX platform_state_type_idx
+    ON platform_state (split_part(key, ':', 1));
+```
+
+**Key namespaces:**
+
+| Prefix | Example key | Stores |
+|--------|-------------|--------|
+| `normalized_requirement:` | `normalized_requirement:NR-A3F2B1` | `NormalizedRequirement` JSON |
+| `test_suite:` | `test_suite:TS-B7E3D2` | `TestSuite` JSON |
+
+**Key design decisions:**
+- JSONB over typed columns — the RAA/TGA schemas evolve independently; no migrations needed for field additions
+- Single table — keeps infrastructure minimal; separate tables add no query benefit since all access is by primary key
+- `updated_at` tracks review mutations (approve/reject changes the `status` field in-place via upsert)
+
+**Graceful degradation:** If Postgres is unavailable at startup, the application falls back to `InMemoryStateStore`. The pipeline runs normally; results are lost on restart. A startup log line indicates which backend is active:
+```
+state_store.using_postgres  (normal)
+state_store.postgres_unavailable error=... detail=Results will not persist across restarts  (fallback)
+```
+
+### 7.2 Vector Store (`requirements_embeddings`)
+
+Stores embeddings of historical requirements for RAG context enrichment.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE requirements_embeddings (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    requirement_id TEXT UNIQUE NOT NULL,   -- REQ-001, etc.
+    tags           TEXT[],                 -- domain scope filter
+    payload        JSONB NOT NULL,         -- full requirement metadata
+    embedding      VECTOR(384)             -- all-MiniLM-L6-v2 output
+);
+
+-- ivfflat index for approximate nearest-neighbour search
+CREATE INDEX requirements_embeddings_embedding_idx
+    ON requirements_embeddings
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+```
+
+**Similarity query used by RAGEnricherSkill:**
+```sql
+SELECT payload, 1 - (embedding <=> $1::vector) AS score
+FROM requirements_embeddings
+WHERE 1 - (embedding <=> $1::vector) >= 0.7   -- score_threshold
+ORDER BY score DESC
+LIMIT 5;
+```
+
+`<=>` is pgvector's cosine distance operator. `1 - distance = similarity`.
+
+### 7.3 Local Dev Setup
+
+One Docker command starts everything needed:
+
+```bash
+docker run -d --name qa-postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=qa_platform \
+  -p 5432:5432 \
+  pgvector/pgvector:pg17
+```
+
+The application creates all tables and indexes automatically on startup — no manual migration step.
+
+**Default `DATABASE_URL`:** `postgresql://postgres:postgres@localhost:5432/qa_platform`
+
+Override in `.env`:
+```
+DATABASE_URL=postgresql://user:pass@host:5432/qa_platform
+```
 
 ### 6.3 Incremental Rollout
 

@@ -202,7 +202,7 @@ export function TGAReviewPage() {
   const [actionError, setActionError] = useState<string | null>(null)
 
   const { data, error, isLoading } = useSWR<TestSuite>(
-    id ? `/api/v1/tests/${id}` : null,
+    id ? `/tests/${id}` : null,
     fetcher,
   )
 
@@ -280,7 +280,7 @@ export function TGAReviewPage() {
           to={`/requirements/${data.source_requirement_id}`}
           className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-2"
         >
-          <ChevronLeft className="h-4 w-4" /> RAA Review
+          <ChevronLeft className="h-4 w-4" /> Analysis
         </Link>
         <div className="flex items-start justify-between">
           <div>

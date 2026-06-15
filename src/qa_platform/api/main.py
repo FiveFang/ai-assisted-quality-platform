@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from .routes import requirements, tests
+from ..infrastructure.review_store import review_store
+from ..infrastructure.state_store import state_store
 from ..infrastructure.vector_store import vector_store
 
 logger = structlog.get_logger()
@@ -31,6 +33,16 @@ FastAPIInstrumentor.instrument_app(app)
 
 @app.on_event("startup")
 async def startup() -> None:
+    try:
+        await state_store.upgrade_to_postgres()
+        await review_store.upgrade_to_postgres()
+    except Exception as exc:
+        logger.warning(
+            "state_store.postgres_unavailable",
+            error=str(exc),
+            detail="Results will not persist across restarts (in-memory fallback active)",
+        )
+
     try:
         await vector_store.ensure_collection()
     except Exception as exc:

@@ -44,7 +44,7 @@ Respond with JSON:
 class EntityExtractorSkill:
     """Identifies domain entities and external dependencies for test data and mock planning."""
 
-    async def execute(self, artifacts: dict[str, Any]) -> dict[str, Any]:
+    async def execute(self, artifacts: dict[str, Any], max_tokens: int | None = None) -> dict[str, Any]:
         import json
 
         logger.info("entity_extractor.start")
@@ -55,6 +55,7 @@ class EntityExtractorSkill:
                 "content": _USER.format(artifacts=json.dumps(artifacts, indent=2)),
             }],
             tier=ModelTier.BALANCED,
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
         logger.info(
             "entity_extractor.complete",

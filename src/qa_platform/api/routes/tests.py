@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...agents.test_generation.agent import TestGenerationAgent
+from ...infrastructure.review_store import review_store
 from ...infrastructure.state_store import state_store
 from ...schemas.requirements import NormalizedRequirement
 from ...schemas.test_cases import TestSuite
@@ -40,6 +41,10 @@ async def generate_tests(request: GenerateRequest) -> TestSuite:
     normalized = NormalizedRequirement.model_validate(data)
     suite = await _tga.process(normalized)
     await state_store.set(f"test_suite:{suite.test_suite_id}", suite.model_dump(mode="json"))
+    await state_store.set(
+        f"req_to_test:{request.requirement_id}",
+        {"test_suite_id": suite.test_suite_id},
+    )
     return suite
 
 
@@ -67,6 +72,13 @@ async def review_test_suite(test_suite_id: str, signal: ReviewSignal) -> dict[st
         )
 
     await state_store.set(f"test_suite:{test_suite_id}", data)
+    await review_store.insert(
+        entity_key=f"test_suite:{test_suite_id}",
+        entity_type="test_suite",
+        entity_id=test_suite_id,
+        approved=approved_flag,
+        reason=signal.reason,
+    )
     status = "APPROVED" if approved_flag else "REJECTED"
     logger.info("test_suite.review", test_suite_id=test_suite_id, approved=approved_flag)
     return {"test_suite_id": test_suite_id, "status": status}

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import useSWR from 'swr'
-import { Loader2, AlertTriangle, CheckCircle, XCircle, ChevronLeft } from 'lucide-react'
+import { Loader2, AlertTriangle, CheckCircle, XCircle, ChevronLeft, History, FlaskConical } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
@@ -9,7 +9,48 @@ import { SkillPanel } from '@/components/SkillPanel'
 import { ConfidenceBadge } from '@/components/ConfidenceBadge'
 import { StatusBadge } from '@/components/StatusBadge'
 import { fetcher, api } from '@/api/client'
-import type { NormalizedRequirement, Ambiguity, Requirement, Workflow, Entity, BusinessRule } from '@/types/api'
+import type { NormalizedRequirement, Ambiguity, Requirement, Workflow, Entity, BusinessRule, ReviewEvent } from '@/types/api'
+
+function timeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
+function ReviewHistory({ requirementId }: { requirementId: string }) {
+  const { data } = useSWR<ReviewEvent[]>(
+    `/requirements/${requirementId}/review-history`,
+    fetcher,
+  )
+  if (!data || data.length === 0) return null
+  return (
+    <div className="border-t pt-6 space-y-3">
+      <h3 className="text-sm font-medium flex items-center gap-2 text-muted-foreground">
+        <History className="h-4 w-4" /> Review history
+      </h3>
+      <ol className="space-y-2">
+        {data.map((ev) => (
+          <li key={ev.id} className="flex items-start gap-3 text-sm">
+            {ev.approved
+              ? <CheckCircle className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
+              : <XCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" />}
+            <div className="flex-1 min-w-0">
+              <span className="font-medium">{ev.approved ? 'Approved' : 'Rejected'}</span>
+              {ev.reason && (
+                <span className="text-muted-foreground"> — {ev.reason}</span>
+              )}
+            </div>
+            <span className="text-xs text-muted-foreground shrink-0">{timeAgo(ev.created_at)}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
 
 const PRIORITY_VARIANT: Record<string, 'danger' | 'warning' | 'info' | 'secondary'> = {
   P0: 'danger',
@@ -163,12 +204,20 @@ export function RAAReviewPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [rejectReason, setRejectReason] = useState('')
-  const [submitting, setSubmitting] = useState<'approve' | 'reject' | null>(null)
+  const [submitting, setSubmitting] = useState<'approve' | 'reject' | 'generate' | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const { data, error, isLoading } = useSWR<NormalizedRequirement>(
-    id ? `/api/v1/requirements/${id}` : null,
+  const { data, error, isLoading, mutate } = useSWR<NormalizedRequirement>(
+    id ? `/requirements/${id}` : null,
     fetcher,
+  )
+
+  const { data: testSuiteRef } = useSWR<{ test_suite_id: string }>(
+    data?.status === 'APPROVED' || data?.status === 'AWAITING_REVIEW'
+      ? `/requirements/${id}/test-suite`
+      : null,
+    fetcher,
+    { shouldRetryOnError: false, onErrorRetry: () => {} },
   )
 
   if (isLoading) {
@@ -195,6 +244,7 @@ export function RAAReviewPage() {
     setActionError(null)
     try {
       await api.reviewRequirement(data.requirement_id, true)
+      await mutate()
       const suite = await api.generateTests(data.requirement_id)
       navigate(`/tests/${suite.test_suite_id}`)
     } catch (err) {
@@ -216,13 +266,25 @@ export function RAAReviewPage() {
     }
   }
 
+  const handleGenerateTests = async () => {
+    setSubmitting('generate')
+    setActionError(null)
+    try {
+      const suite = await api.generateTests(data.requirement_id)
+      navigate(`/tests/${suite.test_suite_id}`)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed')
+      setSubmitting(null)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
           <Link to="/" className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-2">
-            <ChevronLeft className="h-4 w-4" /> Dashboard
+            <ChevronLeft className="h-4 w-4" /> Requirements
           </Link>
           <h1 className="text-2xl font-semibold">{data.source.reference}</h1>
           <div className="flex items-center gap-3 mt-1">
@@ -385,44 +447,87 @@ export function RAAReviewPage() {
         </SkillPanel>
       </div>
 
-      {/* Review gate */}
-      <div className="border-t pt-6 space-y-3">
-        {!canApprove && (
-          <p className="text-sm text-red-600 flex items-center gap-1.5">
-            <XCircle className="h-4 w-4" />
-            {blockingAmbiguities.length} blocking {blockingAmbiguities.length === 1 ? 'ambiguity' : 'ambiguities'} must be resolved before approval.
-          </p>
-        )}
+      <ReviewHistory requirementId={data.requirement_id} />
 
-        <div className="flex items-start gap-3">
-          <Textarea
-            placeholder="Rejection reason (required to reject)…"
-            rows={2}
-            value={rejectReason}
-            onChange={(e) => setRejectReason(e.target.value)}
-            className="flex-1"
-          />
-          <div className="flex flex-col gap-2">
-            <Button
-              variant="destructive"
-              onClick={handleReject}
-              disabled={!rejectReason.trim() || submitting !== null}
-            >
-              {submitting === 'reject' ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
-              Reject
-            </Button>
-            <Button
-              onClick={handleApprove}
-              disabled={!canApprove || submitting !== null}
-            >
-              {submitting === 'approve' ? (
-                <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
-              ) : (
-                <><CheckCircle className="h-4 w-4" /> Approve & Generate Tests</>
-              )}
+      {/* Action gate — varies by status */}
+      <div className="border-t pt-6 space-y-3">
+        {/* Already has tests generated */}
+        {testSuiteRef && (
+          <div className="flex items-center justify-between rounded-lg border border-green-200 bg-green-50 px-4 py-3">
+            <div className="flex items-center gap-2 text-sm text-green-800">
+              <FlaskConical className="h-4 w-4" />
+              <span className="font-medium">Tests have been generated for this analysis.</span>
+            </div>
+            <Button asChild size="sm">
+              <Link to={`/tests/${testSuiteRef.test_suite_id}`}>
+                View Test Suite →
+              </Link>
             </Button>
           </div>
-        </div>
+        )}
+
+        {/* Awaiting review — show approve/reject */}
+        {data.status === 'AWAITING_REVIEW' && !testSuiteRef && (
+          <>
+            {!canApprove && (
+              <p className="text-sm text-red-600 flex items-center gap-1.5">
+                <XCircle className="h-4 w-4" />
+                {blockingAmbiguities.length} blocking {blockingAmbiguities.length === 1 ? 'ambiguity' : 'ambiguities'} must be resolved before approval.
+              </p>
+            )}
+            <div className="flex items-start gap-3">
+              <Textarea
+                placeholder="Rejection reason (required to reject)…"
+                rows={2}
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                className="flex-1"
+              />
+              <div className="flex flex-col gap-2">
+                <Button
+                  variant="destructive"
+                  onClick={handleReject}
+                  disabled={!rejectReason.trim() || submitting !== null}
+                >
+                  {submitting === 'reject' ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
+                  Reject
+                </Button>
+                <Button
+                  onClick={handleApprove}
+                  disabled={!canApprove || submitting !== null}
+                >
+                  {submitting === 'approve' ? (
+                    <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
+                  ) : (
+                    <><CheckCircle className="h-4 w-4" /> Approve & Generate Tests</>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Approved but no tests yet */}
+        {data.status === 'APPROVED' && !testSuiteRef && (
+          <div className="flex items-center justify-between rounded-lg border bg-muted/30 px-4 py-3">
+            <p className="text-sm text-muted-foreground">
+              Requirement is approved. No test suite generated yet.
+            </p>
+            <Button onClick={handleGenerateTests} disabled={submitting !== null} size="sm">
+              {submitting === 'generate'
+                ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
+                : <><FlaskConical className="h-4 w-4" /> Generate Tests</>}
+            </Button>
+          </div>
+        )}
+
+        {/* Rejected */}
+        {data.status === 'REJECTED' && (
+          <p className="text-sm text-muted-foreground flex items-center gap-1.5">
+            <XCircle className="h-4 w-4 text-destructive" />
+            This requirement was rejected. Re-analyze with updated inputs to proceed.
+          </p>
+        )}
 
         {actionError && <p className="text-sm text-destructive">{actionError}</p>}
       </div>

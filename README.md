@@ -16,7 +16,7 @@ Human review gates sit between and after each agent. Low confidence or blocking 
 ## Requirements
 
 - Python 3.11+
-- [Qdrant](https://qdrant.tech/) (local Docker or hosted) — vector store for RAG
+- [PostgreSQL 16+](https://www.postgresql.org/) with [pgvector](https://github.com/pgvector/pgvector) — state persistence and RAG vector search
 - [Temporal](https://temporal.io/) (optional for dev) — durable workflow orchestration
 - Anthropic API key
 
@@ -48,11 +48,21 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 Everything else has sensible defaults for local development.
 
-### 3. Start Qdrant (Docker)
+### 3. Start PostgreSQL + pgvector (Docker)
 
 ```bash
-docker run -d -p 6333:6333 qdrant/qdrant
+docker run -d --name qa-postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=qa_platform \
+  -p 5432:5432 \
+  pgvector/pgvector:pg17
 ```
+
+The `pgvector/pgvector` image ships with the extension pre-installed. The platform
+creates all tables automatically on startup — no migrations to run manually.
+
+If Postgres is unavailable the platform starts with an **in-memory fallback** —
+the pipeline runs normally but results are lost on restart.
 
 ### 4. Start Temporal (optional — skip for dev/test)
 
@@ -61,15 +71,17 @@ docker run -d -p 6333:6333 qdrant/qdrant
 temporal server start-dev
 ```
 
-If Temporal is not running, the platform uses the in-memory state store (not durable — dev only).
+If Temporal is not running, the platform calls agents directly via HTTP and stores
+results in Postgres. Temporal adds durable replay on crash and the 7-day human
+review wait — not required for local development.
 
 ### 5. Run the API server
 
 ```bash
-uvicorn qa_platform.api.main:app --reload
+uvicorn qa_platform.api.main:app --reload --port 8001
 ```
 
-API available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+API available at `http://localhost:8001`. Interactive docs at `http://localhost:8001/docs`.
 
 ---
 
@@ -167,8 +179,8 @@ src/qa_platform/
 │   └── test_cases.py                # TestSuite, TestCase — TGA output contract
 ├── infrastructure/
 │   ├── llm_client.py                # Anthropic client with model routing and retry
-│   ├── vector_store.py              # Qdrant wrapper for RAG
-│   └── state_store.py               # In-memory state store (dev fallback)
+│   ├── vector_store.py              # PostgreSQL + pgvector wrapper for RAG
+│   └── state_store.py               # Postgres-backed state store (in-memory fallback)
 ├── agents/
 │   ├── requirement_analysis/
 │   │   ├── agent.py                 # RAA orchestrator

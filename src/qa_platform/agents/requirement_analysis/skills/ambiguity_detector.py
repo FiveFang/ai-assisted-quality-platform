@@ -59,6 +59,7 @@ class AmbiguityDetectorSkill:
         self,
         requirements: list[dict[str, Any]],
         rules: list[dict[str, Any]],
+        max_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
         import json
 
@@ -73,6 +74,7 @@ class AmbiguityDetectorSkill:
                 ),
             }],
             tier=ModelTier.BALANCED,
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
         ambiguities = result.get("ambiguities", [])
         blocking = sum(1 for a in ambiguities if a.get("blocking"))

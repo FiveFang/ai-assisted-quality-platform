@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
+
+ProgressFn = Callable[[str, list[str]], Awaitable[None]]
 
 import structlog
 
@@ -57,71 +59,119 @@ class RequirementAnalysisAgent:
         self,
         source: RequirementSource,
         raw_inputs: dict[str, Any],
+        on_progress: ProgressFn | None = None,
+        max_tokens: int | None = None,
     ) -> NormalizedRequirement:
         start = time.monotonic()
         log = logger.bind(source_type=source.type, reference=source.reference)
         log.info("raa.process.start")
 
         skills_executed: list[str] = []
+        skill_warnings: list[str] = []
 
-        # Step 1 — parse input artifacts in parallel
+        async def _progress(step: str) -> None:
+            if on_progress:
+                try:
+                    await on_progress(step, list(skills_executed))
+                except Exception:
+                    pass  # progress updates are best-effort
+
+        await _progress("parsing")
+        # Step 1 — parse input artifacts in parallel (per-parser fault tolerance)
         parse_coros: dict[str, Any] = {}
         if "prd" in raw_inputs:
-            parse_coros["PRDParserSkill"] = self._prd_parser.execute(raw_inputs["prd"])
+            parse_coros["PRDParserSkill"] = self._prd_parser.execute(raw_inputs["prd"], max_tokens=max_tokens)
         if "jira" in raw_inputs:
-            parse_coros["JiraParserSkill"] = self._jira_parser.execute(raw_inputs["jira"])
+            parse_coros["JiraParserSkill"] = self._jira_parser.execute(raw_inputs["jira"], max_tokens=max_tokens)
         if "openapi" in raw_inputs:
             parse_coros["OpenAPIParserSkill"] = self._openapi_parser.execute(raw_inputs["openapi"])
 
         if not parse_coros:
             raise ValueError("raw_inputs must contain at least one of: prd, jira, openapi")
 
-        parsed_results = await asyncio.gather(*parse_coros.values())
-        parsed = dict(zip(parse_coros.keys(), parsed_results))
-        skills_executed.extend(parse_coros.keys())
-        log.info("raa.parse.complete", parsers=list(parse_coros.keys()))
+        raw_parse = await asyncio.gather(*parse_coros.values(), return_exceptions=True)
+        parsed: dict[str, Any] = {}
+        for name, result in zip(parse_coros.keys(), raw_parse):
+            if isinstance(result, BaseException):
+                log.warning("raa.skill.failed", skill=name, error=str(result))
+                skill_warnings.append(f"{name} failed: {result}")
+            else:
+                parsed[name] = result
+                skills_executed.append(name)
 
-        # Step 2 — extract discrete requirements (POWERFUL tier)
-        requirements = await self._req_extractor.execute(parsed)
+        if not parsed:
+            raise ValueError(
+                f"All input parsers failed — cannot continue. Errors: {'; '.join(skill_warnings)}"
+            )
+        log.info("raa.parse.complete", parsers=list(parsed.keys()))
+        await _progress("extracting")
+
+        # Step 2 — extract discrete requirements (critical — failure aborts pipeline)
+        requirements = await self._req_extractor.execute(parsed, max_tokens=max_tokens)
         skills_executed.append("RequirementExtractorSkill")
+        await _progress("enriching")
 
-        # Step 3 — parallel extraction + RAG enrichment
-        (
-            workflows,
-            rules,
-            entities,
-            enriched_context,
-        ) = await asyncio.gather(
-            self._workflow_extractor.execute(requirements),
-            self._rule_extractor.execute(requirements),
-            self._entity_extractor.execute(parsed),
+        # Step 3 — parallel extraction + RAG enrichment (non-critical: degrade gracefully)
+        _rag_default: dict[str, Any] = {
+            "is_available": False,
+            "similar_requirements": [],
+            "relevant_domain_knowledge": [],
+            "historical_test_patterns": [],
+        }
+        step3_names = ["WorkflowExtractorSkill", "RuleExtractorSkill", "EntityExtractorSkill", "RAGEnricherSkill"]
+        step3_defaults: list[Any] = [[], [], [], _rag_default]
+        step3_raw = await asyncio.gather(
+            self._workflow_extractor.execute(requirements, max_tokens=max_tokens),
+            self._rule_extractor.execute(requirements, max_tokens=max_tokens),
+            self._entity_extractor.execute(parsed, max_tokens=max_tokens),
             self._rag_enricher.execute(requirements),
+            return_exceptions=True,
         )
-        skills_executed.extend([
-            "WorkflowExtractorSkill",
-            "RuleExtractorSkill",
-            "EntityExtractorSkill",
-            "RAGEnricherSkill",
-        ])
+        step3_values: list[Any] = []
+        for name, result, default in zip(step3_names, step3_raw, step3_defaults):
+            if isinstance(result, BaseException):
+                log.warning("raa.skill.failed", skill=name, error=str(result))
+                skill_warnings.append(f"{name} failed: {result}")
+                step3_values.append(default)
+            else:
+                skills_executed.append(name)
+                step3_values.append(result)
+        workflows, rules, entities, enriched_context = step3_values
+        await _progress("ambiguities")
 
-        # Step 4 — detect ambiguities
-        ambiguities = await self._ambiguity_detector.execute(requirements, rules)
-        skills_executed.append("AmbiguityDetectorSkill")
+        # Step 4 — detect ambiguities (non-critical)
+        try:
+            ambiguities = await self._ambiguity_detector.execute(requirements, rules, max_tokens=max_tokens)
+            skills_executed.append("AmbiguityDetectorSkill")
+        except Exception as exc:
+            log.warning("raa.skill.failed", skill="AmbiguityDetectorSkill", error=str(exc))
+            skill_warnings.append(f"AmbiguityDetectorSkill failed: {exc}")
+            ambiguities = []
+        await _progress("scoring")
 
-        # Step 5 — confidence scoring
-        confidence = await self._confidence_scorer.execute(
-            requirements=requirements,
-            workflows=workflows,
-            rules=rules,
-            entities=entities,
-            ambiguities=ambiguities,
-        )
-        skills_executed.append("ConfidenceScorerSkill")
+        # Step 5 — confidence scoring (non-critical; default 0.5 forces human review)
+        try:
+            confidence = await self._confidence_scorer.execute(
+                requirements=requirements,
+                workflows=workflows,
+                rules=rules,
+                entities=entities,
+                ambiguities=ambiguities,
+            )
+            skills_executed.append("ConfidenceScorerSkill")
+        except Exception as exc:
+            log.warning("raa.skill.failed", skill="ConfidenceScorerSkill", error=str(exc))
+            skill_warnings.append(f"ConfidenceScorerSkill failed: {exc}")
+            confidence = 0.5
 
-        # Step 6 — escalation check
+        await _progress("assembling")
+        # Step 6 — escalation check; any skill failure forces human review
         human_review_required, review_reasons = self._evaluate_escalation(confidence, ambiguities)
+        if skill_warnings:
+            human_review_required = True
+            review_reasons = [*review_reasons, *skill_warnings]
 
-        # Step 7 — assemble validated output
+        # Step 7 — assemble validated output (critical)
         duration_ms = int((time.monotonic() - start) * 1000)
         result = await self._json_generator.execute(
             source=source,
@@ -151,6 +201,7 @@ class RequirementAnalysisAgent:
             requirement_id=result.requirement_id,
             confidence=confidence,
             human_review_required=human_review_required,
+            skills_failed=len(skill_warnings),
             duration_ms=duration_ms,
         )
         return result

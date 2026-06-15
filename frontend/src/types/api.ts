@@ -174,4 +174,36 @@ export interface AnalyzeRequest {
   reference: string
   url?: string
   raw_inputs: Record<string, string>
+  job_id?: string
+  max_tokens?: number
+}
+
+export interface AnalysisProgress {
+  current_step: string | null
+  completed_steps: string[]
+  elapsed_seconds: number
+  status: 'running' | 'complete' | 'failed'
+  error?: string
+  requirement_id?: string
+}
+
+export interface RequirementSummary {
+  requirement_id: string
+  reference: string
+  status: ProcessingStatus
+  confidence_score: number
+  created_at: string
+  requirement_count: number
+  human_review_required: boolean
+  test_suite_id?: string
+}
+
+export interface ReviewEvent {
+  id: string
+  entity_key: string
+  entity_type: string
+  entity_id: string
+  approved: boolean
+  reason: string | null
+  created_at: string
 }

@@ -41,12 +41,13 @@ Respond with JSON:
 class JiraParserSkill:
     """Parses Jira issue exports or Gherkin user stories into normalized story objects."""
 
-    async def execute(self, jira_content: str) -> dict[str, Any]:
+    async def execute(self, jira_content: str, max_tokens: int | None = None) -> dict[str, Any]:
         logger.info("jira_parser.start", content_length=len(jira_content))
         result = await llm_client.complete_structured(
             system=_SYSTEM,
             messages=[{"role": "user", "content": _USER.format(jira_content=jira_content)}],
             tier=ModelTier.FAST,
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
         logger.info("jira_parser.complete", story_count=len(result.get("stories", [])))
         return result

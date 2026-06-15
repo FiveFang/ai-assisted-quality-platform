@@ -44,12 +44,13 @@ Respond with JSON matching this exact structure:
 class PRDParserSkill:
     """Normalizes free-form PRD documents into structured feature/requirement data."""
 
-    async def execute(self, prd_content: str) -> dict[str, Any]:
+    async def execute(self, prd_content: str, max_tokens: int | None = None) -> dict[str, Any]:
         logger.info("prd_parser.start", content_length=len(prd_content))
         result = await llm_client.complete_structured(
             system=_SYSTEM,
             messages=[{"role": "user", "content": _USER.format(prd_content=prd_content)}],
             tier=ModelTier.BALANCED,
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
         logger.info("prd_parser.complete", feature_count=len(result.get("features", [])))
         return result

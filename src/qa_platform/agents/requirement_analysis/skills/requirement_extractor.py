@@ -53,7 +53,7 @@ class RequirementExtractorSkill:
     Uses POWERFUL tier — quality here multiplies through all downstream processing.
     """
 
-    async def execute(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    async def execute(self, parsed: dict[str, Any], max_tokens: int | None = None) -> list[dict[str, Any]]:
         logger.info("req_extractor.start")
         import json
 
@@ -64,7 +64,7 @@ class RequirementExtractorSkill:
                 "content": _USER.format(parsed_artifacts=json.dumps(parsed, indent=2)),
             }],
             tier=ModelTier.POWERFUL,
-            max_tokens=8192,
+            max_tokens=max_tokens if max_tokens is not None else 16384,
         )
         requirements = result.get("requirements", [])
         logger.info("req_extractor.complete", requirement_count=len(requirements))

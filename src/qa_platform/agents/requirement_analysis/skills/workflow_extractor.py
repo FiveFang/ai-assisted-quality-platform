@@ -47,7 +47,7 @@ Respond with JSON:
 class WorkflowExtractorSkill:
     """Extracts user journeys as step-sequenced workflows — the skeleton for E2E test generation."""
 
-    async def execute(self, requirements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def execute(self, requirements: list[dict[str, Any]], max_tokens: int | None = None) -> list[dict[str, Any]]:
         import json
 
         logger.info("workflow_extractor.start", req_count=len(requirements))
@@ -58,6 +58,7 @@ class WorkflowExtractorSkill:
                 "content": _USER.format(requirements=json.dumps(requirements, indent=2)),
             }],
             tier=ModelTier.BALANCED,
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
         workflows = result.get("workflows", [])
         logger.info("workflow_extractor.complete", workflow_count=len(workflows))

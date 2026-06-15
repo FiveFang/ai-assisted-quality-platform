@@ -1,6 +1,8 @@
 import type {
   AnalyzeRequest,
   NormalizedRequirement,
+  RequirementSummary,
+  ReviewEvent,
   TestSuite,
 } from '@/types/api'
 
@@ -21,11 +23,20 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 export const fetcher = <T>(url: string): Promise<T> => apiFetch<T>(url)
 
 export const api = {
+  listRequirements: () =>
+    apiFetch<RequirementSummary[]>('/requirements/'),
+
   analyzeRequirements: (body: AnalyzeRequest) =>
     apiFetch<NormalizedRequirement>('/requirements/analyze', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  getReviewHistory: (requirementId: string) =>
+    apiFetch<ReviewEvent[]>(`/requirements/${requirementId}/review-history`),
+
+  getTestSuiteForRequirement: (requirementId: string) =>
+    apiFetch<{ test_suite_id: string }>(`/requirements/${requirementId}/test-suite`),
 
   reviewRequirement: (id: string, approved: boolean, reason?: string) =>
     apiFetch<{ requirement_id: string; status: string }>(

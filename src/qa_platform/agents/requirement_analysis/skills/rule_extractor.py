@@ -44,7 +44,7 @@ class RuleExtractorSkill:
     is_explicit=false rules flag potential missing acceptance criteria for human review.
     """
 
-    async def execute(self, requirements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def execute(self, requirements: list[dict[str, Any]], max_tokens: int | None = None) -> list[dict[str, Any]]:
         import json
 
         logger.info("rule_extractor.start", req_count=len(requirements))
@@ -55,6 +55,7 @@ class RuleExtractorSkill:
                 "content": _USER.format(requirements=json.dumps(requirements, indent=2)),
             }],
             tier=ModelTier.BALANCED,
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         )
         rules = result.get("rules", [])
         logger.info("rule_extractor.complete", rule_count=len(rules))

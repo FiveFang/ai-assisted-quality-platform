@@ -16,6 +16,15 @@ export function Layout({ children }: { children: ReactNode }) {
           </Link>
           <nav className="flex items-center gap-4 text-sm">
             <Link
+              to="/"
+              className={cn(
+                'text-muted-foreground hover:text-foreground transition-colors',
+                pathname === '/' && 'text-foreground font-medium',
+              )}
+            >
+              Requirements
+            </Link>
+            <Link
               to="/analyze"
               className={cn(
                 'text-muted-foreground hover:text-foreground transition-colors',
