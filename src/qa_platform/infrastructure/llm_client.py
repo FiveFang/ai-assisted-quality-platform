@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 from collections.abc import Iterator
@@ -263,8 +264,7 @@ class LLMClient:
             LLMProvider.OPENAI: _OpenAIProvider,
             LLMProvider.GEMINI: _GeminiProvider,
         }
-        import asyncio
-        self._semaphore = asyncio.Semaphore(settings.max_concurrent_llm_calls)
+        self._semaphore: asyncio.Semaphore | None = None
 
     def _try_repair_json(self, raw: str, error_pos: int = 0) -> str | None:
         """
@@ -323,6 +323,10 @@ class LLMClient:
         log = logger.bind(provider=spec.provider.value, model=spec.model_id)
         log.debug("llm.request", message_count=len(messages), json_mode=json_mode)
 
+        # Lazy-init semaphore inside the running event loop (module-level singleton
+        # is created at import time before any event loop exists).
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(settings.max_concurrent_llm_calls)
         async with self._semaphore:
             content = await provider.complete(system, messages, spec.model_id, max_tokens, json_mode)
 
