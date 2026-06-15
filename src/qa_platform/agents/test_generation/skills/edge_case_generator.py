@@ -71,7 +71,7 @@ class EdgeCaseGeneratorSkill:
                     entities=json.dumps(entities, indent=2),
                 ),
             }],
-            tier=ModelTier.POWERFUL,
+            tier=ModelTier.FAST,
         )
         cases = result.get("test_cases", [])
         for case in cases:

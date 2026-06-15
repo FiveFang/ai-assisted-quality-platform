@@ -61,7 +61,7 @@ class PositiveScenarioSkill:
                     rules=json.dumps(rules, indent=2),
                 ),
             }],
-            tier=ModelTier.BALANCED,
+            tier=ModelTier.FAST,
         )
         cases = result.get("test_cases", [])
         for case in cases:
