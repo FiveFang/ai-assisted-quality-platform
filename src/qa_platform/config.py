@@ -79,7 +79,7 @@ class Settings(BaseSettings):
 
     max_skill_retries: int = 3
     skill_retry_delay_seconds: float = 1.0
-    max_concurrent_llm_calls: int = 5
+    max_concurrent_llm_calls: int = 3
 
     embedding_model: str = "all-MiniLM-L6-v2"
 

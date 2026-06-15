@@ -52,7 +52,13 @@ export const api = {
 
   generateTests: (
     requirement_id: string,
-    opts?: { job_id?: string; model?: string; signal?: AbortSignal },
+    opts?: {
+      job_id?: string
+      model?: string
+      signal?: AbortSignal
+      selected_skills?: string[]
+      selected_requirement_ids?: string[]
+    },
   ) =>
     apiFetch<TestSuite>('/tests/generate', {
       method: 'POST',
@@ -60,8 +66,16 @@ export const api = {
         requirement_id,
         ...(opts?.job_id ? { job_id: opts.job_id } : {}),
         ...(opts?.model ? { model: opts.model } : {}),
+        ...(opts?.selected_skills ? { selected_skills: opts.selected_skills } : {}),
+        ...(opts?.selected_requirement_ids ? { selected_requirement_ids: opts.selected_requirement_ids } : {}),
       }),
       signal: opts?.signal,
+    }),
+
+  updateTestCase: (suiteId: string, testId: string, patch: Partial<import('@/types/api').TestCase>) =>
+    apiFetch<import('@/types/api').TestCase>(`/tests/${suiteId}/cases/${testId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
     }),
 
   reviewTestSuite: (id: string, approved: boolean, reason?: string) =>

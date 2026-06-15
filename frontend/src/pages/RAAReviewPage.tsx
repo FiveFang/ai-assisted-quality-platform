@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useMemo, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import useSWR from 'swr'
 import {
@@ -276,6 +276,23 @@ export function RAAReviewPage() {
   const [retrying, setRetrying] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const ALL_SKILLS = ['functional', 'negative', 'edge_case', 'api', 'security', 'ui'] as const
+  const [selectedSkills, setSelectedSkills] = useState<Set<string>>(new Set(ALL_SKILLS))
+  const [selectedReqIds, setSelectedReqIds] = useState<Set<string>>(new Set())
+
+  const toggleSkill = (key: string) =>
+    setSelectedSkills((prev) => {
+      const next = new Set(prev)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
+
+  const toggleReq = (id: string) =>
+    setSelectedReqIds((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
   const genAbortRef = useRef<AbortController | null>(null)
   const genJobRef = useRef<string | null>(null)
 
@@ -289,6 +306,17 @@ export function RAAReviewPage() {
     fetcher,
     { shouldRetryOnError: false, onErrorRetry: () => {} },
   )
+
+  const nonRejectedReqs = useMemo(() => {
+    if (!data) return []
+    const rejected = new Set(Object.keys(data.rejected_requirements ?? {}))
+    return data.requirements.filter((r) => !rejected.has(r.requirement_id))
+  }, [data])
+
+  // Initialise requirement selection to all non-rejected whenever the NR loads/changes.
+  useEffect(() => {
+    setSelectedReqIds(new Set(nonRejectedReqs.map((r) => r.requirement_id)))
+  }, [data?.requirement_id])
 
   if (isLoading) {
     return (
@@ -332,7 +360,11 @@ export function RAAReviewPage() {
       await api.reviewRequirement(data.requirement_id, true)
       await mutate()
       const job = startGenJob()
-      const suite = await api.generateTests(data.requirement_id, job)
+      const suite = await api.generateTests(data.requirement_id, {
+        ...job,
+        selected_skills: selectedSkills.size < ALL_SKILLS.length ? [...selectedSkills] : undefined,
+        selected_requirement_ids: selectedReqIds.size < nonRejectedReqs.length ? [...selectedReqIds] : undefined,
+      })
       navigate(`/tests/${suite.test_suite_id}`)
     } catch (err) {
       setActionError(isCancellation(err) ? 'Test generation cancelled.' : (err instanceof Error ? err.message : 'Failed'))
@@ -353,7 +385,11 @@ export function RAAReviewPage() {
     setSubmitting('generate'); setActionError(null); setCancelling(false)
     try {
       const job = startGenJob()
-      const suite = await api.generateTests(data.requirement_id, job)
+      const suite = await api.generateTests(data.requirement_id, {
+        ...job,
+        selected_skills: selectedSkills.size < ALL_SKILLS.length ? [...selectedSkills] : undefined,
+        selected_requirement_ids: selectedReqIds.size < nonRejectedReqs.length ? [...selectedReqIds] : undefined,
+      })
       navigate(`/tests/${suite.test_suite_id}`)
     } catch (err) {
       setActionError(isCancellation(err) ? 'Test generation cancelled.' : (err instanceof Error ? err.message : 'Failed'))
@@ -618,6 +654,102 @@ export function RAAReviewPage() {
 
       {/* Action panel */}
       <div className="rounded-2xl border bg-card p-5 space-y-4">
+
+        {/* Skill selector — only shown when generation is available */}
+        {!testSuiteRef && (data.status === 'AWAITING_REVIEW' || data.status === 'APPROVED') && submitting === null && (
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Test types to generate</p>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                { key: 'functional', label: 'Functional', sub: 'Happy-path' },
+                { key: 'negative',   label: 'Negative',   sub: 'Error paths' },
+                { key: 'edge_case',  label: 'Edge Cases', sub: 'Boundaries' },
+                { key: 'api',        label: 'API Tests',  sub: 'HTTP contracts' },
+                { key: 'security',   label: 'Security',   sub: 'OWASP checks' },
+                { key: 'ui',         label: 'UI / Mobile', sub: 'Playwright/Appium' },
+              ] as const).map(({ key, label, sub }) => {
+                const checked = selectedSkills.has(key)
+                return (
+                  <label
+                    key={key}
+                    className={[
+                      'flex items-start gap-2.5 rounded-xl border p-3 cursor-pointer transition-colors select-none',
+                      checked ? 'border-primary/40 bg-primary/5' : 'border-border bg-background hover:bg-muted/40',
+                    ].join(' ')}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleSkill(key)}
+                      className="mt-0.5 h-3.5 w-3.5 accent-primary shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium leading-none">{label}</p>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">{sub}</p>
+                    </div>
+                  </label>
+                )
+              })}
+            </div>
+            {selectedSkills.size === 0 && (
+              <p className="text-xs text-destructive">Select at least one test type.</p>
+            )}
+          </div>
+        )}
+
+        {/* Requirement selector */}
+        {!testSuiteRef && (data.status === 'AWAITING_REVIEW' || data.status === 'APPROVED') && submitting === null && nonRejectedReqs.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Requirements ({selectedReqIds.size} / {nonRejectedReqs.length} selected)
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setSelectedReqIds(new Set(nonRejectedReqs.map((r) => r.requirement_id)))}
+                  className="text-xs text-primary hover:underline"
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setSelectedReqIds(new Set())}
+                  className="text-xs text-muted-foreground hover:underline"
+                >
+                  None
+                </button>
+              </div>
+            </div>
+            <div className="space-y-0.5 max-h-44 overflow-y-auto rounded-xl border bg-background p-2">
+              {nonRejectedReqs.map((req) => {
+                const checked = selectedReqIds.has(req.requirement_id)
+                return (
+                  <label
+                    key={req.requirement_id}
+                    className={[
+                      'flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 cursor-pointer transition-colors',
+                      checked ? 'bg-primary/5' : 'hover:bg-muted/40',
+                    ].join(' ')}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleReq(req.requirement_id)}
+                      className="h-3.5 w-3.5 accent-primary shrink-0"
+                    />
+                    <span className="font-mono text-[10px] text-muted-foreground shrink-0 w-24 truncate">
+                      {req.requirement_id}
+                    </span>
+                    <span className="text-xs truncate">{req.title}</span>
+                  </label>
+                )
+              })}
+            </div>
+            {selectedReqIds.size === 0 && (
+              <p className="text-xs text-destructive">Select at least one requirement.</p>
+            )}
+          </div>
+        )}
+
         {(submitting === 'approve' || submitting === 'generate') && (
           <div className="flex items-center justify-between rounded-xl border border-primary/20 bg-primary/5 px-4 py-3">
             <div className="flex items-center gap-2 text-sm text-primary">
@@ -673,7 +805,7 @@ export function RAAReviewPage() {
                   {submitting === 'reject' ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
                   Reject
                 </Button>
-                <Button onClick={handleApprove} disabled={!canApprove || submitting !== null}>
+                <Button onClick={handleApprove} disabled={!canApprove || submitting !== null || selectedSkills.size === 0 || selectedReqIds.size === 0}>
                   {submitting === 'approve'
                     ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
                     : <><CheckCircle2 className="h-4 w-4" /> Approve & Generate Tests</>
@@ -687,7 +819,7 @@ export function RAAReviewPage() {
         {data.status === 'APPROVED' && !testSuiteRef && (
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">Approved — no test suite generated yet.</p>
-            <Button onClick={handleGenerateTests} disabled={submitting !== null} size="sm">
+            <Button onClick={handleGenerateTests} disabled={submitting !== null || selectedSkills.size === 0 || selectedReqIds.size === 0} size="sm">
               {submitting === 'generate'
                 ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
                 : <><FlaskConical className="h-4 w-4" /> Generate Tests</>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, HTTPException
@@ -32,11 +33,24 @@ class GenerateRequest(BaseModel):
     requirement_id: str
     model: str | None = None  # "provider:model_id" override; None = tier-based routing
     job_id: str | None = None  # client-supplied id for cancellation
+    selected_skills: list[str] | None = None  # None = all; subset of ["functional","negative","edge_case","api","security","ui"]
+    selected_requirement_ids: list[str] | None = None  # None = all non-rejected
 
 
 class ReviewSignal(BaseModel):
     approved: bool
     reason: str | None = None
+
+
+class TestCasePatch(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    type: str | None = None
+    priority: str | None = None
+    preconditions: list[str] | None = None
+    steps: list[dict[str, Any]] | None = None
+    expected_results: list[str] | None = None
+    tags: list[str] | None = None
 
 
 @router.post("/generate", response_model=TestSuite)
@@ -77,9 +91,15 @@ async def generate_tests(request: GenerateRequest) -> TestSuite:
     if job_id:
         job_registry.register(job_id, asyncio.current_task())  # type: ignore[arg-type]
 
+    selected_skills = set(request.selected_skills) if request.selected_skills else None
+
     try:
         with use_model(model_override):
-            suite = await _tga.process(normalized)
+            suite = await _tga.process(
+                normalized,
+                selected_skills=selected_skills,
+                selected_requirement_ids=request.selected_requirement_ids,
+            )
     except asyncio.CancelledError:
         raise HTTPException(status_code=499, detail="Test generation cancelled by user")
     except LLMAuthError as exc:
@@ -112,6 +132,28 @@ async def get_test_suite(test_suite_id: str) -> TestSuite:
     if not data:
         raise HTTPException(status_code=404, detail="Test suite not found")
     return TestSuite.model_validate(data)
+
+
+@router.patch("/{test_suite_id}/cases/{test_id}")
+async def update_test_case(
+    test_suite_id: str, test_id: str, patch: TestCasePatch
+) -> dict[str, Any]:
+    """Update editable fields of a single test case within a saved test suite."""
+    data = await state_store.get(f"test_suite:{test_suite_id}")
+    if not data:
+        raise HTTPException(status_code=404, detail="Test suite not found")
+
+    cases: list[dict[str, Any]] = data.get("test_cases", [])
+    for i, tc in enumerate(cases):
+        if tc.get("test_id") == test_id:
+            updates = patch.model_dump(exclude_none=True)
+            cases[i] = {**tc, **updates}
+            data["test_cases"] = cases
+            await state_store.set(f"test_suite:{test_suite_id}", data)
+            logger.info("test_case.updated", test_suite_id=test_suite_id, test_id=test_id)
+            return cases[i]
+
+    raise HTTPException(status_code=404, detail="Test case not found")
 
 
 @router.post("/{test_suite_id}/review")
