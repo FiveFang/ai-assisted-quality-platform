@@ -82,7 +82,7 @@ class SecurityTestGeneratorSkill:
                     entities=json.dumps(entities, indent=2),
                 ),
             }],
-            tier=ModelTier.FAST,
+            tier=ModelTier.BALANCED,
             max_tokens=8192,
         )
         cases = result.get("test_cases", [])

@@ -79,7 +79,7 @@ class MobileUIGeneratorSkill:
                     ui_requirements=json.dumps(ui_reqs, indent=2),
                 ),
             }],
-            tier=ModelTier.FAST,
+            tier=ModelTier.BALANCED,
         )
         cases = result.get("test_cases", [])
         logger.info("mobile_ui_generator.complete", test_count=len(cases))

@@ -70,7 +70,7 @@ class APITestGeneratorSkill:
                     "role": "user",
                     "content": _USER.format(endpoint=json.dumps(endpoint, indent=2)),
                 }],
-                tier=ModelTier.FAST,
+                tier=ModelTier.BALANCED,
             )
             for endpoint in api_contracts
         ]

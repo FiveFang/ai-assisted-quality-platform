@@ -65,7 +65,7 @@ class ScaffoldGeneratorSkill:
                         "role": "user",
                         "content": _USER.format(test_case=json.dumps(tc.model_dump(), indent=2)),
                     }],
-                    tier=ModelTier.FAST,
+                    tier=ModelTier.BALANCED,
                 )
                 return idx, AutomationScaffold(**result)
             except Exception as exc:
