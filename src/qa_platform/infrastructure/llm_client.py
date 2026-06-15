@@ -20,6 +20,11 @@ from .llm_errors import (
 
 logger = structlog.get_logger()
 
+# Read timeout for a single (streamed) LLM call. Generous because we stream —
+# streaming keeps the connection alive across long generations, so this only
+# trips on a genuinely stuck request, not a slow-but-progressing one.
+_REQUEST_TIMEOUT_SECONDS = 300.0
+
 # Request-scoped model override. When set, it supersedes per-skill tier routing for
 # the duration of a single analysis/generation run. ContextVar is async-safe: tasks
 # spawned via asyncio.gather inherit the value set on the parent request task.
@@ -65,7 +70,8 @@ class _AnthropicProvider:
         self._anthropic = anthropic
         self._client = anthropic.AsyncAnthropic(
             api_key=settings.anthropic_api_key,
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx.Timeout(_REQUEST_TIMEOUT_SECONDS, connect=10.0),
+            max_retries=0,  # we own retries via tenacity — don't double-retry
         )
 
     async def complete(
@@ -77,15 +83,18 @@ class _AnthropicProvider:
         json_mode: bool,
     ) -> str:
         a = self._anthropic
-        # Anthropic has no native JSON mode; the prompt + markdown-strip fallback
-        # in complete_structured() handles JSON reliably, so json_mode is a no-op here.
+        # Stream so the connection stays alive across long generations (avoids
+        # read-timeout-then-retry storms on large max_tokens). Anthropic has no
+        # native JSON mode; the markdown-strip fallback handles json_mode.
         try:
-            response = await self._client.messages.create(
+            async with self._client.messages.stream(
                 model=model_id,
                 system=system,
                 messages=messages,
                 max_tokens=max_tokens,
-            )
+            ) as stream:
+                final = await stream.get_final_message()
+            return final.content[0].text
         except a.AuthenticationError as exc:
             raise LLMAuthError(str(exc), provider="anthropic", status_code=401) from exc
         except a.RateLimitError as exc:
@@ -102,7 +111,6 @@ class _AnthropicProvider:
                 provider="anthropic",
                 status_code=getattr(exc, "status_code", None),
             ) from exc
-        return response.content[0].text
 
 
 class _OpenAIProvider:
@@ -119,7 +127,11 @@ class _OpenAIProvider:
         if not settings.openai_api_key:
             raise ValueError("OPENAI_API_KEY is not set but an OpenAI model was requested.")
         self._openai = openai
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=60.0)
+        self._client = AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
 
     async def complete(
         self,
@@ -137,13 +149,22 @@ class _OpenAIProvider:
                 system = system + "\n\nRespond with a single valid JSON object."
             kwargs["response_format"] = {"type": "json_object"}
         try:
-            # OpenAI carries the system prompt as the first message, not a top-level field.
-            response = await self._client.chat.completions.create(
+            # Stream and accumulate so long generations don't hit the read timeout.
+            stream = await self._client.chat.completions.create(
                 model=model_id,
                 messages=[{"role": "system", "content": system}, *messages],
                 max_completion_tokens=max_tokens,
+                stream=True,
                 **kwargs,
             )
+            parts: list[str] = []
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    parts.append(delta)
+            return "".join(parts)
         except o.AuthenticationError as exc:
             raise LLMAuthError(str(exc), provider="openai", status_code=401) from exc
         except o.RateLimitError as exc:
@@ -156,7 +177,6 @@ class _OpenAIProvider:
             raise LLMProviderError(
                 str(exc), provider="openai", status_code=getattr(exc, "status_code", None)
             ) from exc
-        return response.choices[0].message.content or ""
 
 
 class _GeminiProvider:
@@ -173,7 +193,10 @@ class _GeminiProvider:
         if not settings.google_api_key:
             raise ValueError("GOOGLE_API_KEY is not set but a Gemini model was requested.")
         self._errors = genai_errors
-        self._client = genai.Client(api_key=settings.google_api_key)
+        self._client = genai.Client(
+            api_key=settings.google_api_key,
+            http_options={"timeout": int(_REQUEST_TIMEOUT_SECONDS * 1000)},  # ms
+        )
 
     async def complete(
         self,
@@ -199,11 +222,16 @@ class _GeminiProvider:
             response_mime_type="application/json" if json_mode else None,
         )
         try:
-            response = await self._client.aio.models.generate_content(
+            # Stream and accumulate so long generations don't hit the read timeout.
+            parts: list[str] = []
+            async for chunk in await self._client.aio.models.generate_content_stream(
                 model=model_id,
                 contents=contents,
                 config=config,
-            )
+            ):
+                if chunk.text:
+                    parts.append(chunk.text)
+            return "".join(parts)
         except self._errors.APIError as exc:
             code = getattr(exc, "code", None)
             msg = getattr(exc, "message", str(exc))
@@ -214,7 +242,6 @@ class _GeminiProvider:
             if isinstance(code, int) and 400 <= code < 500:
                 raise LLMBadRequestError(msg, provider="gemini", status_code=code) from exc
             raise LLMProviderError(msg, provider="gemini", status_code=code) from exc
-        return response.text or ""
 
 
 class LLMClient:
@@ -223,9 +250,10 @@ class LLMClient:
     structured (JSON) output. Each tier resolves to a "provider:model_id" spec from
     settings, so models can be swapped — across providers — via env vars alone.
 
-    Provider clients are created lazily on first use, so a deployment that only uses
-    Anthropic never needs the OpenAI or Gemini SDKs installed. All provider failures
-    are normalized to the exceptions in llm_errors so callers handle them uniformly.
+    All providers stream internally (keeping the connection alive across long
+    generations) and have their SDK-level auto-retry disabled — retries are owned
+    here by tenacity, so there's a single retry layer. Provider clients are created
+    lazily on first use; failures are normalized to the exceptions in llm_errors.
     """
 
     def __init__(self) -> None:

@@ -26,10 +26,16 @@ export const api = {
   listRequirements: () =>
     apiFetch<RequirementSummary[]>('/requirements/'),
 
-  analyzeRequirements: (body: AnalyzeRequest) =>
+  analyzeRequirements: (body: AnalyzeRequest, signal?: AbortSignal) =>
     apiFetch<NormalizedRequirement>('/requirements/analyze', {
       method: 'POST',
       body: JSON.stringify(body),
+      signal,
+    }),
+
+  cancelJob: (jobId: string) =>
+    apiFetch<{ job_id: string; status: string }>(`/jobs/${jobId}/cancel`, {
+      method: 'POST',
     }),
 
   getReviewHistory: (requirementId: string) =>
@@ -44,10 +50,18 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ approved, reason }) },
     ),
 
-  generateTests: (requirement_id: string) =>
+  generateTests: (
+    requirement_id: string,
+    opts?: { job_id?: string; model?: string; signal?: AbortSignal },
+  ) =>
     apiFetch<TestSuite>('/tests/generate', {
       method: 'POST',
-      body: JSON.stringify({ requirement_id }),
+      body: JSON.stringify({
+        requirement_id,
+        ...(opts?.job_id ? { job_id: opts.job_id } : {}),
+        ...(opts?.model ? { model: opts.model } : {}),
+      }),
+      signal: opts?.signal,
     }),
 
   reviewTestSuite: (id: string, approved: boolean, reason?: string) =>

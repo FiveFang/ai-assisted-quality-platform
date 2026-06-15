@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...agents.requirement_analysis.agent import RequirementAnalysisAgent
+from ...infrastructure import job_registry
 from ...infrastructure.llm_client import use_model
 from ...infrastructure.llm_errors import (
     LLMAuthError,
@@ -124,6 +125,9 @@ async def analyze_requirements(request: AnalyzeRequest) -> NormalizedRequirement
                 "status": "running",
             })
 
+    if job_id:
+        job_registry.register(job_id, asyncio.current_task())  # type: ignore[arg-type]
+
     try:
         with use_model(model_override):
             result = await _raa.process(
@@ -132,6 +136,10 @@ async def analyze_requirements(request: AnalyzeRequest) -> NormalizedRequirement
                 on_progress=_on_progress,
                 max_tokens=request.max_tokens,
             )
+    except asyncio.CancelledError:
+        if job_id:
+            await state_store.set(f"analysis_progress:{job_id}", {"status": "cancelled", "error": "Cancelled by user"})
+        raise HTTPException(status_code=499, detail="Analysis cancelled by user")
     except LLMAuthError as exc:
         if job_id:
             await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": "API key invalid"})
@@ -162,6 +170,9 @@ async def analyze_requirements(request: AnalyzeRequest) -> NormalizedRequirement
         if job_id:
             await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": str(exc)})
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+    finally:
+        if job_id:
+            job_registry.unregister(job_id)
 
     await state_store.set(f"normalized_requirement:{result.requirement_id}", result.model_dump(mode="json"))
     if job_id:

@@ -210,6 +210,8 @@ export function AnalyzePage() {
   const [jobId, setJobId] = useState<string | null>(null)
   const [progress, setProgress] = useState<AnalysisProgress | null>(null)
   const [draftRestored, setDraftRestored] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
 
   const {
     register,
@@ -258,11 +260,20 @@ export function AnalyzePage() {
     return () => { cancelled = true; clearInterval(interval) }
   }, [isSubmitting, jobId])
 
+  const handleCancel = async () => {
+    setCancelling(true)
+    if (jobId) { try { await api.cancelJob(jobId) } catch { /* ignore */ } }
+    abortRef.current?.abort()
+  }
+
   const onSubmit = async (values: FormValues) => {
     setError(null)
     setProgress(null)
+    setCancelling(false)
     const id = crypto.randomUUID()
     setJobId(id)
+    const controller = new AbortController()
+    abortRef.current = controller
 
     const raw_inputs: Record<string, string> = {}
     if (values.prd)     raw_inputs.prd = values.prd
@@ -278,11 +289,21 @@ export function AnalyzePage() {
         job_id: id,
         ...(values.max_tokens ? { max_tokens: values.max_tokens } : {}),
         ...(values.model ? { model: values.model } : {}),
-      })
+      }, controller.signal)
       clearDraft()
       navigate(`/requirements/${result.requirement_id}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Analysis failed')
+      // Aborted locally, or the server returned 499 — both mean "cancelled by user"
+      const aborted = err instanceof DOMException && err.name === 'AbortError'
+      const cancelled499 = err instanceof Error && err.message.toLowerCase().includes('cancelled')
+      if (aborted || cancelled499) {
+        setError('Analysis cancelled.')
+      } else {
+        setError(err instanceof Error ? err.message : 'Analysis failed')
+      }
+    } finally {
+      setCancelling(false)
+      abortRef.current = null
     }
   }
 
@@ -439,16 +460,37 @@ export function AnalyzePage() {
           </div>
         </InputSection>
 
-        {/* Error */}
+        {/* Error / cancellation notice */}
         {error && (
-          <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3.5">
-            <p className="text-sm font-medium text-destructive mb-0.5">Analysis failed</p>
-            <p className="text-xs text-destructive/80 break-words">{error}</p>
-          </div>
+          error === 'Analysis cancelled.' ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+              <p className="text-sm text-amber-800">Analysis cancelled. Your inputs are saved — adjust and run again.</p>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3.5">
+              <p className="text-sm font-medium text-destructive mb-0.5">Analysis failed</p>
+              <p className="text-xs text-destructive/80 break-words">{error}</p>
+            </div>
+          )
         )}
 
-        {/* Submit */}
-        <div className="flex justify-end pt-1">
+        {/* Submit / Cancel */}
+        <div className="flex justify-end gap-2 pt-1">
+          {isSubmitting && (
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              onClick={handleCancel}
+              disabled={cancelling}
+              className="border-destructive/30 text-destructive hover:bg-destructive/5"
+            >
+              {cancelling
+                ? <><Loader2 className="h-4 w-4 animate-spin" /> Cancelling…</>
+                : <><XCircle className="h-4 w-4" /> Cancel</>
+              }
+            </Button>
+          )}
           <Button type="submit" disabled={isSubmitting} size="lg" className="min-w-36">
             {isSubmitting
               ? <><Loader2 className="h-4 w-4 animate-spin" /> Analyzing…</>

@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     balanced_model: str = Field(default="anthropic:claude-sonnet-4-6", alias="BALANCED_MODEL")
     powerful_model: str = Field(default="anthropic:claude-opus-4-8", alias="POWERFUL_MODEL")
 
-    default_model_tier: ModelTier = ModelTier.BALANCED
+    default_model_tier: ModelTier = ModelTier.FAST
 
     database_url: str = Field(
         default="postgresql://postgres:postgres@localhost:5432/qa_platform",

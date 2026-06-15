@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...agents.test_generation.agent import TestGenerationAgent
+from ...infrastructure import job_registry
 from ...infrastructure.llm_client import use_model
 from ...infrastructure.llm_errors import (
     LLMAuthError,
@@ -28,6 +31,7 @@ _tga = TestGenerationAgent()
 class GenerateRequest(BaseModel):
     requirement_id: str
     model: str | None = None  # "provider:model_id" override; None = tier-based routing
+    job_id: str | None = None  # client-supplied id for cancellation
 
 
 class ReviewSignal(BaseModel):
@@ -69,9 +73,15 @@ async def generate_tests(request: GenerateRequest) -> TestSuite:
             detail="All requirements have been rejected — nothing to generate tests for.",
         )
 
+    job_id = request.job_id
+    if job_id:
+        job_registry.register(job_id, asyncio.current_task())  # type: ignore[arg-type]
+
     try:
         with use_model(model_override):
             suite = await _tga.process(normalized)
+    except asyncio.CancelledError:
+        raise HTTPException(status_code=499, detail="Test generation cancelled by user")
     except LLMAuthError as exc:
         raise HTTPException(status_code=500, detail=f"{(exc.provider or 'LLM').title()} API key is invalid or missing.")
     except LLMBadRequestError as exc:
@@ -83,6 +93,9 @@ async def generate_tests(request: GenerateRequest) -> TestSuite:
     except LLMError as exc:
         status = exc.status_code or "unknown"
         raise HTTPException(status_code=502, detail=f"{(exc.provider or 'LLM').title()} API error ({status}): {exc.message}")
+    finally:
+        if job_id:
+            job_registry.unregister(job_id)
 
     await state_store.set(f"test_suite:{suite.test_suite_id}", suite.model_dump(mode="json"))
     await state_store.set(

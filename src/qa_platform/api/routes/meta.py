@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...config import LLMProvider, ModelSpec, parse_model_spec, settings
+from ...infrastructure import job_registry
 
 router = APIRouter()
 
@@ -43,6 +44,13 @@ async def list_models() -> ModelsResponse:
         if _sdk_installed(s.provider)
     ]
     return ModelsResponse(default="Default (tier-based routing)", options=options)
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str) -> dict[str, str]:
+    """Terminate an in-flight analysis or test-generation run by its job_id."""
+    cancelled = job_registry.cancel(job_id)
+    return {"job_id": job_id, "status": "cancelling" if cancelled else "not_found"}
 
 
 def resolve_model_override(model: str | None) -> ModelSpec | None:

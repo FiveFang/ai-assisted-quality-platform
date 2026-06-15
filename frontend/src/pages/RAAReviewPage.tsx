@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import useSWR from 'swr'
 import {
@@ -274,7 +274,10 @@ export function RAAReviewPage() {
   const [rejectReason, setRejectReason] = useState('')
   const [submitting, setSubmitting] = useState<'approve' | 'reject' | 'generate' | null>(null)
   const [retrying, setRetrying] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const genAbortRef = useRef<AbortController | null>(null)
+  const genJobRef = useRef<string | null>(null)
 
   const { data, error, isLoading, mutate } = useSWR<NormalizedRequirement>(
     id ? `/requirements/${id}` : null, fetcher,
@@ -305,14 +308,36 @@ export function RAAReviewPage() {
   const blockingAmbiguities = data.ambiguities.filter((a) => a.blocking)
   const canApprove = blockingAmbiguities.length === 0
 
+  const isCancellation = (err: unknown) =>
+    (err instanceof DOMException && err.name === 'AbortError') ||
+    (err instanceof Error && err.message.toLowerCase().includes('cancelled'))
+
+  const startGenJob = () => {
+    const controller = new AbortController()
+    const jobId = crypto.randomUUID()
+    genAbortRef.current = controller
+    genJobRef.current = jobId
+    return { signal: controller.signal, job_id: jobId }
+  }
+
+  const handleCancelGenerate = async () => {
+    setCancelling(true)
+    if (genJobRef.current) { try { await api.cancelJob(genJobRef.current) } catch { /* ignore */ } }
+    genAbortRef.current?.abort()
+  }
+
   const handleApprove = async () => {
-    setSubmitting('approve'); setActionError(null)
+    setSubmitting('approve'); setActionError(null); setCancelling(false)
     try {
       await api.reviewRequirement(data.requirement_id, true)
       await mutate()
-      const suite = await api.generateTests(data.requirement_id)
+      const job = startGenJob()
+      const suite = await api.generateTests(data.requirement_id, job)
       navigate(`/tests/${suite.test_suite_id}`)
-    } catch (err) { setActionError(err instanceof Error ? err.message : 'Failed'); setSubmitting(null) }
+    } catch (err) {
+      setActionError(isCancellation(err) ? 'Test generation cancelled.' : (err instanceof Error ? err.message : 'Failed'))
+      setSubmitting(null); setCancelling(false)
+    }
   }
 
   const handleReject = async () => {
@@ -325,11 +350,15 @@ export function RAAReviewPage() {
   }
 
   const handleGenerateTests = async () => {
-    setSubmitting('generate'); setActionError(null)
+    setSubmitting('generate'); setActionError(null); setCancelling(false)
     try {
-      const suite = await api.generateTests(data.requirement_id)
+      const job = startGenJob()
+      const suite = await api.generateTests(data.requirement_id, job)
       navigate(`/tests/${suite.test_suite_id}`)
-    } catch (err) { setActionError(err instanceof Error ? err.message : 'Failed'); setSubmitting(null) }
+    } catch (err) {
+      setActionError(isCancellation(err) ? 'Test generation cancelled.' : (err instanceof Error ? err.message : 'Failed'))
+      setSubmitting(null); setCancelling(false)
+    }
   }
 
   // Parse which skills failed from review_reasons (e.g. "AmbiguityDetectorSkill failed: ...")
@@ -589,6 +618,28 @@ export function RAAReviewPage() {
 
       {/* Action panel */}
       <div className="rounded-2xl border bg-card p-5 space-y-4">
+        {(submitting === 'approve' || submitting === 'generate') && (
+          <div className="flex items-center justify-between rounded-xl border border-primary/20 bg-primary/5 px-4 py-3">
+            <div className="flex items-center gap-2 text-sm text-primary">
+              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+              <span>Generating tests — this can take a minute…</span>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleCancelGenerate}
+              disabled={cancelling}
+              className="border-destructive/30 text-destructive hover:bg-destructive/5 shrink-0"
+            >
+              {cancelling
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Cancelling…</>
+                : <><XCircle className="h-3.5 w-3.5" /> Cancel</>
+              }
+            </Button>
+          </div>
+        )}
+
         {testSuiteRef && (
           <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
             <div className="flex items-center gap-2 text-sm text-emerald-800">
@@ -652,7 +703,11 @@ export function RAAReviewPage() {
           </p>
         )}
 
-        {actionError && <p className="text-xs text-destructive">{actionError}</p>}
+        {actionError && (
+          <p className={`text-xs ${actionError.toLowerCase().includes('cancelled') ? 'text-amber-600' : 'text-destructive'}`}>
+            {actionError}
+          </p>
+        )}
       </div>
     </div>
   )
