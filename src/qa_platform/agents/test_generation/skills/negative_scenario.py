@@ -66,7 +66,7 @@ class NegativeScenarioSkill:
                     rules=json.dumps(rules, indent=2),
                 ),
             }],
-            tier=ModelTier.FAST,
+            tier=ModelTier.BALANCED,
         )
         cases = result.get("test_cases", [])
         for case in cases:
