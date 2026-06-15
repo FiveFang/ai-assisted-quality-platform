@@ -8,8 +8,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
+import useSWR from 'swr'
 import { api, fetcher } from '@/api/client'
-import type { AnalysisProgress } from '@/types/api'
+import type { AnalysisProgress, ModelsResponse } from '@/types/api'
 
 /* ─── Draft persistence ────────────────────────────────────────────── */
 
@@ -52,6 +53,7 @@ const schema = z.object({
   jira: z.string().optional(),
   openapi: z.string().optional(),
   max_tokens: z.number().int().positive().optional(),
+  model: z.string().optional(),
 }).refine(
   (d) => d.prd || d.jira || d.openapi,
   { message: 'Provide at least one input (PRD, Jira, or OpenAPI)', path: ['prd'] },
@@ -219,6 +221,10 @@ export function AnalyzePage() {
   } = useForm<FormValues>({ resolver: zodResolver(schema) })
 
   const maxTokens = watch('max_tokens')
+  const model = watch('model')
+
+  // Models the server can actually serve (only providers with keys configured)
+  const { data: modelsData } = useSWR<ModelsResponse>('/models', fetcher)
 
   // Restore draft on mount
   useEffect(() => {
@@ -271,6 +277,7 @@ export function AnalyzePage() {
         raw_inputs,
         job_id: id,
         ...(values.max_tokens ? { max_tokens: values.max_tokens } : {}),
+        ...(values.model ? { model: values.model } : {}),
       })
       clearDraft()
       navigate(`/requirements/${result.requirement_id}`)
@@ -383,6 +390,51 @@ export function AnalyzePage() {
             </div>
             {maxTokens && maxTokens > 32768 && (
               <p className="text-xs text-amber-600">High token limits increase cost and latency significantly.</p>
+            )}
+
+            {modelsData && modelsData.options.length > 0 && (
+              <div className="space-y-2 pt-3 border-t">
+                <p className="text-xs text-muted-foreground">
+                  Model — defaults to per-step routing (fast models for parsing, powerful for extraction).
+                  Pick one to force the entire analysis onto a specific model.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setValue('model', undefined)}
+                    className={[
+                      'rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
+                      !model
+                        ? 'border-primary bg-primary text-primary-foreground'
+                        : 'border-input bg-background hover:bg-muted',
+                    ].join(' ')}
+                  >
+                    Default
+                  </button>
+                  {modelsData.options.map((opt) => (
+                    <button
+                      key={opt.spec}
+                      type="button"
+                      onClick={() => setValue('model', model === opt.spec ? undefined : opt.spec)}
+                      className={[
+                        'rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
+                        model === opt.spec
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-input bg-background hover:bg-muted',
+                      ].join(' ')}
+                      title={opt.spec}
+                    >
+                      {opt.model_id}
+                      <span className={[
+                        'ml-1.5 text-[10px]',
+                        model === opt.spec ? 'text-primary-foreground/70' : 'text-muted-foreground',
+                      ].join(' ')}>
+                        {opt.provider}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         </InputSection>

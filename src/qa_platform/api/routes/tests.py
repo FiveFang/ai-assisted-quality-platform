@@ -5,8 +5,17 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...agents.test_generation.agent import TestGenerationAgent
+from ...infrastructure.llm_client import use_model
+from ...infrastructure.llm_errors import (
+    LLMAuthError,
+    LLMBadRequestError,
+    LLMError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
 from ...infrastructure.review_store import review_store
 from ...infrastructure.state_store import state_store
+from .meta import resolve_model_override
 from ...schemas.requirements import NormalizedRequirement
 from ...schemas.test_cases import TestSuite
 
@@ -18,6 +27,7 @@ _tga = TestGenerationAgent()
 
 class GenerateRequest(BaseModel):
     requirement_id: str
+    model: str | None = None  # "provider:model_id" override; None = tier-based routing
 
 
 class ReviewSignal(BaseModel):
@@ -28,6 +38,8 @@ class ReviewSignal(BaseModel):
 @router.post("/generate", response_model=TestSuite)
 async def generate_tests(request: GenerateRequest) -> TestSuite:
     """Generate test suite from an approved NormalizedRequirement."""
+    model_override = resolve_model_override(request.model)
+
     data = await state_store.get(f"normalized_requirement:{request.requirement_id}")
     if not data:
         raise HTTPException(status_code=404, detail="Requirement not found")
@@ -57,7 +69,21 @@ async def generate_tests(request: GenerateRequest) -> TestSuite:
             detail="All requirements have been rejected — nothing to generate tests for.",
         )
 
-    suite = await _tga.process(normalized)
+    try:
+        with use_model(model_override):
+            suite = await _tga.process(normalized)
+    except LLMAuthError as exc:
+        raise HTTPException(status_code=500, detail=f"{(exc.provider or 'LLM').title()} API key is invalid or missing.")
+    except LLMBadRequestError as exc:
+        raise HTTPException(status_code=400, detail=f"AI API error: {exc.message}")
+    except LLMRateLimitError:
+        raise HTTPException(status_code=429, detail="LLM API rate limit hit — please try again in a moment.")
+    except LLMTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=f"LLM request timed out: {exc.message}")
+    except LLMError as exc:
+        status = exc.status_code or "unknown"
+        raise HTTPException(status_code=502, detail=f"{(exc.provider or 'LLM').title()} API error ({status}): {exc.message}")
+
     await state_store.set(f"test_suite:{suite.test_suite_id}", suite.model_dump(mode="json"))
     await state_store.set(
         f"req_to_test:{request.requirement_id}",

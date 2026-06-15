@@ -28,6 +28,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional LLM providers — install only the ones you use, e.g. pip install 'qa-platform[openai]'
+openai = ["openai>=1.0.0"]
+gemini = ["google-genai>=1.0.0"]
+all-providers = ["openai>=1.0.0", "google-genai>=1.0.0"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

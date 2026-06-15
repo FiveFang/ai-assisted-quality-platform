@@ -177,6 +177,18 @@ export interface AnalyzeRequest {
   raw_inputs: Record<string, string>
   job_id?: string
   max_tokens?: number
+  model?: string
+}
+
+export interface ModelOption {
+  spec: string
+  provider: string
+  model_id: string
+}
+
+export interface ModelsResponse {
+  default: string
+  options: ModelOption[]
 }
 
 export interface AnalysisProgress {

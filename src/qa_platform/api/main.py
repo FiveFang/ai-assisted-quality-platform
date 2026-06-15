@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-from .routes import requirements, tests
+from .routes import meta, requirements, tests
 from ..infrastructure.review_store import review_store
 from ..infrastructure.state_store import state_store
 from ..infrastructure.vector_store import vector_store
@@ -27,6 +27,7 @@ app.add_middleware(
 
 app.include_router(requirements.router, prefix="/api/v1/requirements", tags=["requirements"])
 app.include_router(tests.router, prefix="/api/v1/tests", tags=["tests"])
+app.include_router(meta.router, prefix="/api/v1", tags=["meta"])
 
 FastAPIInstrumentor.instrument_app(app)
 
