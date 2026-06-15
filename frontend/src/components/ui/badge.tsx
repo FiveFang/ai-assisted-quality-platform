@@ -3,24 +3,22 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '@/lib/utils'
 
 const badgeVariants = cva(
-  'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors',
+  'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors',
   {
     variants: {
       variant: {
-        default: 'border-transparent bg-primary text-primary-foreground',
-        secondary: 'border-transparent bg-secondary text-secondary-foreground',
-        destructive: 'border-transparent bg-destructive text-destructive-foreground',
-        outline: 'text-foreground',
-        success: 'border-transparent bg-green-100 text-green-800',
-        warning: 'border-transparent bg-amber-100 text-amber-800',
-        danger: 'border-transparent bg-red-100 text-red-800',
-        info: 'border-transparent bg-blue-100 text-blue-800',
-        purple: 'border-transparent bg-purple-100 text-purple-800',
+        default:     'bg-primary text-primary-foreground',
+        secondary:   'bg-muted text-muted-foreground',
+        destructive: 'bg-red-50 text-red-700 ring-1 ring-red-200',
+        outline:     'ring-1 ring-border text-foreground bg-transparent',
+        success:     'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
+        warning:     'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
+        danger:      'bg-red-50 text-red-700 ring-1 ring-red-200',
+        info:        'bg-sky-50 text-sky-700 ring-1 ring-sky-200',
+        purple:      'bg-violet-50 text-violet-700 ring-1 ring-violet-200',
       },
     },
-    defaultVariants: {
-      variant: 'default',
-    },
+    defaultVariants: { variant: 'default' },
   },
 )
 

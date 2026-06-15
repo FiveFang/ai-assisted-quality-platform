@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import * as Collapsible from '@radix-ui/react-collapsible'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 
@@ -17,28 +17,35 @@ export function SkillPanel({ skillName, label, count, defaultOpen = false, child
 
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen}>
-      <Collapsible.Trigger className="flex w-full items-center justify-between rounded-md border bg-muted/40 px-4 py-3 text-sm hover:bg-muted/70 transition-colors">
-        <div className="flex items-center gap-3">
-          <span className="font-mono text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-            {skillName}
-          </span>
-          <span className="font-medium">{label}</span>
-          {count !== undefined && (
-            <span className="text-xs text-muted-foreground">({count})</span>
-          )}
-        </div>
-        {open ? (
-          <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
-        ) : (
-          <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-        )}
-      </Collapsible.Trigger>
-      <Collapsible.Content
+      <Collapsible.Trigger
         className={cn(
-          'overflow-hidden data-[state=open]:animate-none',
+          'flex w-full items-center justify-between rounded-xl border bg-card px-4 py-3 text-sm transition-colors hover:bg-muted/50',
+          open && 'rounded-b-none border-b-transparent',
         )}
       >
-        <div className="border border-t-0 rounded-b-md p-4 space-y-3">{children}</div>
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] text-primary ring-1 ring-primary/20">
+            {skillName.replace('Skill', '')}
+          </span>
+          <span className="font-medium text-foreground truncate">{label}</span>
+          {count !== undefined && (
+            <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground tabular-nums">
+              {count}
+            </span>
+          )}
+        </div>
+        <ChevronDown
+          className={cn(
+            'h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200',
+            open && 'rotate-180',
+          )}
+        />
+      </Collapsible.Trigger>
+
+      <Collapsible.Content className="overflow-hidden">
+        <div className="rounded-b-xl border border-t-0 bg-card p-4 space-y-3">
+          {children}
+        </div>
       </Collapsible.Content>
     </Collapsible.Root>
   )

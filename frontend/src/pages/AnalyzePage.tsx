@@ -3,13 +3,15 @@ import { useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Loader2, ChevronDown, ChevronUp, CheckCircle, XCircle, Clock, RotateCcw } from 'lucide-react'
+import { Loader2, ChevronDown, ChevronUp, CheckCircle2, XCircle, RotateCcw, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { api, fetcher } from '@/api/client'
 import type { AnalysisProgress } from '@/types/api'
+
+/* ─── Draft persistence ────────────────────────────────────────────── */
 
 const DRAFT_KEY = 'qa_platform_analyze_draft'
 
@@ -19,22 +21,21 @@ function loadDraft(): DraftValues | null {
   try {
     const raw = localStorage.getItem(DRAFT_KEY)
     return raw ? (JSON.parse(raw) as DraftValues) : null
-  } catch {
-    return null
-  }
+  } catch { return null }
 }
 
 function saveDraft(values: DraftValues) {
   try {
-    if (values.reference || values.prd || values.jira || values.openapi) {
+    if (values.reference || values.prd || values.jira || values.openapi)
       localStorage.setItem(DRAFT_KEY, JSON.stringify(values))
-    }
-  } catch { /* storage full or unavailable — ignore */ }
+  } catch { /* ignore */ }
 }
 
 function clearDraft() {
   try { localStorage.removeItem(DRAFT_KEY) } catch { /* ignore */ }
 }
+
+/* ─── Token presets ─────────────────────────────────────────────────── */
 
 const TOKEN_PRESETS = [
   { label: '16K (default)', value: 16384 },
@@ -42,6 +43,8 @@ const TOKEN_PRESETS = [
   { label: '64K', value: 65536 },
   { label: '100K', value: 100000 },
 ] as const
+
+/* ─── Form schema ───────────────────────────────────────────────────── */
 
 const schema = z.object({
   reference: z.string().min(1, 'Project name is required'),
@@ -56,22 +59,22 @@ const schema = z.object({
 
 type FormValues = z.infer<typeof schema>
 
+/* ─── Pipeline stepper ──────────────────────────────────────────────── */
+
 const PIPELINE_STEPS: { key: string; label: string; detail: string }[] = [
-  { key: 'parsing',    label: 'Parsing artifacts',            detail: 'PRD · Jira · OpenAPI' },
-  { key: 'extracting', label: 'Extracting requirements',      detail: 'Claude Opus — most intensive step' },
-  { key: 'enriching',  label: 'Extracting workflows & rules', detail: 'Entities · RAG enrichment · parallel' },
-  { key: 'ambiguities',label: 'Detecting ambiguities',        detail: 'Checking for vague or conflicting requirements' },
-  { key: 'scoring',    label: 'Scoring confidence',           detail: 'Pure calculation — no LLM needed' },
-  { key: 'assembling', label: 'Assembling result',            detail: 'Schema validation & final JSON' },
+  { key: 'parsing',     label: 'Parse artifacts',         detail: 'PRD · Jira · OpenAPI' },
+  { key: 'extracting',  label: 'Extract requirements',    detail: 'Claude Opus — most intensive' },
+  { key: 'enriching',   label: 'Enrich & classify',       detail: 'Workflows · rules · entities · RAG' },
+  { key: 'ambiguities', label: 'Detect ambiguities',      detail: 'Vague or conflicting requirements' },
+  { key: 'scoring',     label: 'Score confidence',        detail: 'Pure calculation — no LLM' },
+  { key: 'assembling',  label: 'Assemble result',         detail: 'Schema validation & final JSON' },
 ]
 
 const STEP_ORDER = PIPELINE_STEPS.map((s) => s.key)
 
-function stepStatus(
-  key: string,
-  currentStep: string | null,
-  pipelineStatus: string,
-): 'done' | 'active' | 'pending' | 'failed' {
+type StepState = 'done' | 'active' | 'pending' | 'failed'
+
+function stepStatus(key: string, currentStep: string | null, pipelineStatus: string): StepState {
   if (pipelineStatus === 'complete') return 'done'
   const currentIdx = currentStep ? STEP_ORDER.indexOf(currentStep) : 0
   const keyIdx = STEP_ORDER.indexOf(key)
@@ -85,7 +88,7 @@ function stepStatus(
   return 'pending'
 }
 
-function PipelineProgress({ progress }: { progress: AnalysisProgress | null; }) {
+function PipelineProgress({ progress }: { progress: AnalysisProgress | null }) {
   const [elapsed, setElapsed] = useState(0)
   const startRef = useRef(Date.now())
 
@@ -100,74 +103,104 @@ function PipelineProgress({ progress }: { progress: AnalysisProgress | null; }) 
   const pipelineStatus = progress?.status ?? 'running'
   const displayElapsed = progress?.elapsed_seconds != null ? Math.round(progress.elapsed_seconds) : elapsed
 
+  const statusLabel =
+    pipelineStatus === 'failed' ? 'Pipeline failed' :
+    pipelineStatus === 'complete' ? 'Analysis complete' :
+    'Running analysis…'
+
   return (
-    <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
-      <div className="flex items-center justify-between text-sm">
-        <span className="font-medium">
-          {pipelineStatus === 'failed' ? 'Pipeline failed' : pipelineStatus === 'complete' ? 'Analysis complete' : 'Running pipeline…'}
-        </span>
+    <div className="rounded-2xl border bg-card p-5 space-y-4">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-foreground">{statusLabel}</span>
         <span className="text-xs text-muted-foreground tabular-nums">{displayElapsed}s</span>
       </div>
 
-      <ul className="space-y-2">
-        {PIPELINE_STEPS.map(({ key, label, detail }) => {
+      <div className="space-y-1">
+        {PIPELINE_STEPS.map(({ key, label, detail }, idx) => {
           const status = stepStatus(key, currentStep, pipelineStatus)
+          const isLast = idx === PIPELINE_STEPS.length - 1
+
           return (
-            <li key={key} className="flex items-start gap-2.5 text-sm">
-              <span className="mt-0.5 shrink-0">
-                {status === 'done'    && <CheckCircle className="h-4 w-4 text-green-500" />}
-                {status === 'active'  && <Loader2 className="h-4 w-4 text-primary animate-spin" />}
-                {status === 'pending' && <Clock className="h-4 w-4 text-muted-foreground/40" />}
-                {status === 'failed'  && <XCircle className="h-4 w-4 text-destructive" />}
-              </span>
-              <div className="min-w-0">
-                <span className={
+            <div key={key} className="flex gap-3">
+              {/* Icon + connector line */}
+              <div className="flex flex-col items-center">
+                <div className={[
+                  'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-all',
+                  status === 'done'    ? 'bg-emerald-100 text-emerald-700' :
+                  status === 'active'  ? 'bg-primary text-primary-foreground shadow-md shadow-primary/30' :
+                  status === 'failed'  ? 'bg-red-100 text-red-600' :
+                  'bg-muted text-muted-foreground/50',
+                ].join(' ')}>
+                  {status === 'done'   && <CheckCircle2 className="h-3.5 w-3.5" />}
+                  {status === 'active' && <Loader2 className="h-3 w-3 animate-spin" />}
+                  {status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
+                  {status === 'pending' && <span>{idx + 1}</span>}
+                </div>
+                {!isLast && (
+                  <div className={[
+                    'w-px flex-1 my-0.5',
+                    status === 'done' ? 'bg-emerald-200' : 'bg-border',
+                  ].join(' ')} style={{ minHeight: '12px' }} />
+                )}
+              </div>
+
+              {/* Step info */}
+              <div className="pb-3 min-w-0">
+                <span className={[
+                  'text-sm',
                   status === 'done'    ? 'text-foreground' :
                   status === 'active'  ? 'text-foreground font-medium' :
                   status === 'failed'  ? 'text-destructive' :
-                  'text-muted-foreground'
-                }>
+                  'text-muted-foreground',
+                ].join(' ')}>
                   {label}
                 </span>
                 {status === 'active' && (
                   <p className="text-xs text-muted-foreground mt-0.5">{detail}</p>
                 )}
               </div>
-            </li>
+            </div>
           )
         })}
-      </ul>
+      </div>
 
       {progress?.error && (
-        <p className="text-xs text-destructive border-t pt-2 mt-1">{progress.error}</p>
+        <p className="text-xs text-destructive border-t pt-3">{progress.error}</p>
       )}
     </div>
   )
 }
+
+/* ─── Collapsible input section ─────────────────────────────────────── */
 
 function InputSection({
   title, badge, children, defaultOpen = false,
 }: { title: string; badge?: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="rounded-lg border overflow-hidden">
+    <div className="rounded-xl border bg-card overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between px-4 py-3 bg-muted/30 hover:bg-muted/50 transition-colors text-sm"
+        className="flex w-full items-center justify-between px-4 py-3 hover:bg-muted/40 transition-colors text-sm"
       >
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
           <span className="font-medium">{title}</span>
           {badge && (
-            <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{badge}</span>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">{badge}</span>
           )}
         </div>
-        {open ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+        {open
+          ? <ChevronUp className="h-4 w-4 text-muted-foreground" />
+          : <ChevronDown className="h-4 w-4 text-muted-foreground" />
+        }
       </button>
-      {open && <div className="p-4 border-t">{children}</div>}
+      {open && <div className="px-4 pb-4 border-t">{children && <div className="pt-3">{children}</div>}</div>}
     </div>
   )
 }
+
+/* ─── Page ──────────────────────────────────────────────────────────── */
 
 export function AnalyzePage() {
   const navigate = useNavigate()
@@ -194,7 +227,7 @@ export function AnalyzePage() {
       reset(draft)
       setDraftRestored(true)
     }
-  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-save draft as user types (debounced 600ms)
   const watchedFields = watch(['reference', 'prd', 'jira', 'openapi'])
@@ -204,26 +237,19 @@ export function AnalyzePage() {
     return () => clearTimeout(t)
   }, [watchedFields])
 
-  // Poll progress while the request is in-flight
+  // Poll progress while in-flight
   useEffect(() => {
     if (!isSubmitting || !jobId) return
     let cancelled = false
-
     const poll = async () => {
       try {
         const p = await fetcher<AnalysisProgress>(`/requirements/progress/${jobId}`)
         if (!cancelled) setProgress(p)
-      } catch {
-        // 404 until the first progress event arrives — ignore
-      }
+      } catch { /* 404 until first event — ignore */ }
     }
-
     poll()
     const interval = setInterval(poll, 1500)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
+    return () => { cancelled = true; clearInterval(interval) }
   }, [isSubmitting, jobId])
 
   const onSubmit = async (values: FormValues) => {
@@ -255,35 +281,44 @@ export function AnalyzePage() {
 
   return (
     <div className="max-w-2xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold">New Analysis</h1>
-        <p className="text-muted-foreground text-sm mt-1">
-          Provide your requirement artifacts. All inputs are optional — submit what you have.
+      {/* Page header */}
+      <div className="mb-7">
+        <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
+            <Sparkles className="h-3.5 w-3.5 text-primary" />
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight">New Analysis</h1>
+        </div>
+        <p className="text-sm text-muted-foreground ml-9">
+          Paste your requirement artifacts — PRD, Jira stories, or OpenAPI spec. Mix and match.
         </p>
       </div>
 
+      {/* Draft restored banner */}
       {draftRestored && (
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm dark:border-amber-800 dark:bg-amber-950/30">
-          <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
+        <div className="mb-4 flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm">
+          <div className="flex items-center gap-2 text-amber-800">
             <RotateCcw className="h-3.5 w-3.5 shrink-0" />
             <span>Draft restored from your last session.</span>
           </div>
           <button
             type="button"
             onClick={() => { clearDraft(); reset({}); setDraftRestored(false) }}
-            className="ml-4 text-xs text-amber-600 underline-offset-2 hover:underline dark:text-amber-400"
+            className="ml-4 text-xs text-amber-600 underline-offset-2 hover:underline"
           >
             Clear
           </button>
         </div>
       )}
 
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="reference">Project name / reference</Label>
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
+        {/* Project reference */}
+        <div className="rounded-xl border bg-card px-4 py-3.5 space-y-1.5">
+          <Label htmlFor="reference" className="text-sm font-medium">Project name / reference</Label>
           <Input
             id="reference"
             placeholder="e.g. checkout-v2-redesign"
+            className="bg-background"
             {...register('reference')}
           />
           {errors.reference && (
@@ -291,28 +326,29 @@ export function AnalyzePage() {
           )}
         </div>
 
-        <div className="space-y-3">
+        {/* Artifact inputs */}
+        <div className="space-y-2">
           <InputSection title="PRD / Design Doc" badge="text" defaultOpen>
             <Textarea
               rows={10}
-              placeholder="Paste your PRD or design document here..."
-              className="font-mono text-xs"
+              placeholder="Paste your PRD or design document here…"
+              className="font-mono text-xs bg-background resize-none"
               {...register('prd')}
             />
           </InputSection>
           <InputSection title="Jira Stories" badge="JSON or text">
             <Textarea
               rows={8}
-              placeholder="Paste exported Jira JSON or story descriptions..."
-              className="font-mono text-xs"
+              placeholder="Paste exported Jira JSON or story descriptions…"
+              className="font-mono text-xs bg-background resize-none"
               {...register('jira')}
             />
           </InputSection>
           <InputSection title="OpenAPI Spec" badge="YAML or JSON">
             <Textarea
               rows={8}
-              placeholder="Paste your OpenAPI/Swagger spec here..."
-              className="font-mono text-xs"
+              placeholder="Paste your OpenAPI / Swagger spec here…"
+              className="font-mono text-xs bg-background resize-none"
               {...register('openapi')}
             />
           </InputSection>
@@ -322,20 +358,20 @@ export function AnalyzePage() {
           <p className="text-sm text-destructive">{errors.prd.message}</p>
         )}
 
+        {/* Advanced options */}
         <InputSection title="Advanced options">
           <div className="space-y-2">
-            <Label className="text-sm">Max output tokens per LLM call</Label>
             <p className="text-xs text-muted-foreground">
-              Increase if analysis fails with a truncation or JSON parse error on large inputs.
+              Max output tokens per LLM call — increase if analysis fails with a truncation error on large inputs.
             </p>
-            <div className="flex flex-wrap gap-2 pt-1">
+            <div className="flex flex-wrap gap-2">
               {TOKEN_PRESETS.map(({ label, value }) => (
                 <button
                   key={value}
                   type="button"
                   onClick={() => setValue('max_tokens', maxTokens === value ? undefined : value)}
                   className={[
-                    'rounded-md border px-3 py-1.5 text-xs font-medium transition-colors',
+                    'rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
                     maxTokens === value
                       ? 'border-primary bg-primary text-primary-foreground'
                       : 'border-input bg-background hover:bg-muted',
@@ -346,30 +382,30 @@ export function AnalyzePage() {
               ))}
             </div>
             {maxTokens && maxTokens > 32768 && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                High token limits increase cost and latency significantly.
-              </p>
+              <p className="text-xs text-amber-600">High token limits increase cost and latency significantly.</p>
             )}
           </div>
         </InputSection>
 
+        {/* Error */}
         {error && (
-          <div className="rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm">
-            <p className="font-medium text-destructive mb-1">Analysis failed</p>
-            <p className="text-destructive/80 break-words">{error}</p>
+          <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3.5">
+            <p className="text-sm font-medium text-destructive mb-0.5">Analysis failed</p>
+            <p className="text-xs text-destructive/80 break-words">{error}</p>
           </div>
         )}
 
-        <div className="flex justify-end gap-3 pt-2">
-          <Button type="submit" disabled={isSubmitting} className="min-w-32">
-            {isSubmitting ? (
-              <><Loader2 className="h-4 w-4 animate-spin" /> Analyzing…</>
-            ) : (
-              'Run Analysis →'
-            )}
+        {/* Submit */}
+        <div className="flex justify-end pt-1">
+          <Button type="submit" disabled={isSubmitting} size="lg" className="min-w-36">
+            {isSubmitting
+              ? <><Loader2 className="h-4 w-4 animate-spin" /> Analyzing…</>
+              : <><Sparkles className="h-4 w-4" /> Run Analysis</>
+            }
           </Button>
         </div>
 
+        {/* Progress stepper */}
         {isSubmitting && <PipelineProgress progress={progress} />}
       </form>
     </div>
