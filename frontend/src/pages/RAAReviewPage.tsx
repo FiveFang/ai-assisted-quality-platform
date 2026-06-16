@@ -189,17 +189,36 @@ function RequirementItem({ req, isRejected, rejectionReason, onReject, onUnrejec
   )
 }
 
-function AmbiguityItem({ amb }: { amb: Ambiguity }) {
+function AmbiguityItem({ amb, onDismiss }: { amb: Ambiguity; onDismiss?: () => void }) {
+  const [dismissing, setDismissing] = useState(false)
+
+  const handleDismiss = async () => {
+    if (!onDismiss) return
+    setDismissing(true)
+    try { await onDismiss() } finally { setDismissing(false) }
+  }
+
   return (
     <div className={[
       'rounded-xl border p-3.5 space-y-1.5',
       amb.blocking ? 'border-red-200 bg-red-50/60' : 'bg-background',
     ].join(' ')}>
-      <div className="flex items-center gap-2 flex-wrap">
-        <AlertTriangle className={`h-3.5 w-3.5 ${amb.blocking ? 'text-red-500' : 'text-amber-500'}`} />
-        <span className="font-mono text-[11px] text-muted-foreground">{amb.ambiguity_id}</span>
-        <Badge variant={SEVERITY_VARIANT[amb.severity] ?? 'secondary'}>{amb.severity}</Badge>
-        {amb.blocking && <Badge variant="danger">Blocking</Badge>}
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <AlertTriangle className={`h-3.5 w-3.5 ${amb.blocking ? 'text-red-500' : 'text-amber-500'}`} />
+          <span className="font-mono text-[11px] text-muted-foreground">{amb.ambiguity_id}</span>
+          <Badge variant={SEVERITY_VARIANT[amb.severity] ?? 'secondary'}>{amb.severity}</Badge>
+          {amb.blocking && <Badge variant="danger">Blocking</Badge>}
+        </div>
+        {amb.blocking && onDismiss && (
+          <button
+            onClick={handleDismiss}
+            disabled={dismissing}
+            className="shrink-0 text-xs text-muted-foreground hover:text-foreground border rounded px-2 py-0.5 hover:bg-background transition-colors disabled:opacity-50"
+          >
+            {dismissing ? <Loader2 className="h-3 w-3 animate-spin inline" /> : 'Dismiss'}
+          </button>
+        )}
       </div>
       <p className="text-sm">{amb.description}</p>
       <p className="text-xs text-muted-foreground">
@@ -423,6 +442,15 @@ export function RAAReviewPage() {
   const rejectedIds = data.rejected_requirements ?? {}
   const rejectedCount = Object.keys(rejectedIds).length
 
+  const handleDismissAmbiguity = async (ambiguityId: string) => {
+    try {
+      await api.dismissAmbiguity(data.requirement_id, ambiguityId)
+      await mutate()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Dismiss failed')
+    }
+  }
+
   const handleRerunSkill = async (skillKey: string) => {
     if (!data) return
     setRetrying(skillKey); setActionError(null)
@@ -546,7 +574,13 @@ export function RAAReviewPage() {
               ? <p className="text-sm text-muted-foreground flex items-center gap-1.5">
                   <CheckCircle2 className="h-4 w-4 text-emerald-500" /> No ambiguities detected.
                 </p>
-              : data.ambiguities.map((a) => <AmbiguityItem key={a.ambiguity_id} amb={a} />)
+              : data.ambiguities.map((a) => (
+                  <AmbiguityItem
+                    key={a.ambiguity_id}
+                    amb={a}
+                    onDismiss={a.blocking ? () => handleDismissAmbiguity(a.ambiguity_id) : undefined}
+                  />
+                ))
           }
         </SkillPanel>
 

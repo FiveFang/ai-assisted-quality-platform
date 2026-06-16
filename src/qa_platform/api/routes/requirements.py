@@ -304,6 +304,33 @@ async def review_requirement(requirement_id: str, signal: ReviewSignal) -> dict[
     return {"requirement_id": requirement_id, "status": new_status.value}
 
 
+@router.patch("/{requirement_id}/ambiguities/{ambiguity_id}")
+async def dismiss_ambiguity(requirement_id: str, ambiguity_id: str) -> dict[str, str]:
+    """Mark a blocking ambiguity as dismissed (non-blocking) so the requirement can proceed to approval."""
+    data = await state_store.get(f"normalized_requirement:{requirement_id}")
+    if not data:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    ambiguities: list[dict] = data.get("ambiguities", [])
+    for i, amb in enumerate(ambiguities):
+        if amb.get("ambiguity_id") == ambiguity_id:
+            ambiguities[i] = {**amb, "blocking": False}
+            data["ambiguities"] = ambiguities
+            # Recalculate human_review_required based on remaining blockers
+            still_blocking = any(a.get("blocking") for a in ambiguities)
+            if not still_blocking:
+                data["human_review_required"] = False
+                data["review_reasons"] = [
+                    r for r in data.get("review_reasons", [])
+                    if "blocking" not in r.lower() and "ambiguit" not in r.lower()
+                ]
+            await state_store.set(f"normalized_requirement:{requirement_id}", data)
+            logger.info("ambiguity.dismissed", requirement_id=requirement_id, ambiguity_id=ambiguity_id)
+            return {"requirement_id": requirement_id, "ambiguity_id": ambiguity_id, "status": "dismissed"}
+
+    raise HTTPException(status_code=404, detail=f"Ambiguity '{ambiguity_id}' not found")
+
+
 @router.get("/{requirement_id}/review-history", response_model=list[ReviewEvent])
 async def get_review_history(requirement_id: str) -> list[ReviewEvent]:
     """Return the full audit log of review decisions for a requirement."""

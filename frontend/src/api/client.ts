@@ -90,6 +90,12 @@ export const api = {
       { method: 'POST' },
     ),
 
+  dismissAmbiguity: (requirementId: string, ambiguityId: string) =>
+    apiFetch<{ requirement_id: string; ambiguity_id: string; status: string }>(
+      `/requirements/${requirementId}/ambiguities/${ambiguityId}`,
+      { method: 'PATCH' },
+    ),
+
   rejectRequirement: (nrId: string, reqId: string, reason?: string) =>
     apiFetch<{ requirement_id: string; item_id: string; status: string }>(
       `/requirements/${nrId}/items/${reqId}/reject`,
