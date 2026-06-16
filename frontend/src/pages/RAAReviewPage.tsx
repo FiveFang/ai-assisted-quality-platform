@@ -805,8 +805,8 @@ export function RAAReviewPage() {
       {/* Action panel */}
       <div className="rounded-2xl border bg-card p-5 space-y-4">
 
-        {/* Skill selector — only shown when generation is available */}
-        {!testSuiteRef && (data.status === 'AWAITING_REVIEW' || data.status === 'APPROVED') && submitting === null && (
+        {/* Skill selector */}
+        {(data.status === 'AWAITING_REVIEW' || data.status === 'APPROVED') && submitting === null && (
           <div className="space-y-2">
             <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Test types to generate</p>
             <div className="grid grid-cols-3 gap-2">
@@ -848,7 +848,7 @@ export function RAAReviewPage() {
         )}
 
         {/* Requirement selector */}
-        {!testSuiteRef && (data.status === 'AWAITING_REVIEW' || data.status === 'APPROVED') && submitting === null && nonRejectedReqs.length > 0 && (
+        {(data.status === 'AWAITING_REVIEW' || data.status === 'APPROVED') && submitting === null && nonRejectedReqs.length > 0 && (
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
@@ -928,9 +928,23 @@ export function RAAReviewPage() {
               <FlaskConical className="h-4 w-4" />
               <span className="font-medium">Tests generated for this analysis.</span>
             </div>
-            <Button asChild size="sm">
-              <Link to={`/tests/${testSuiteRef.test_suite_id}`}>View Test Suite →</Link>
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleGenerateTests}
+                disabled={submitting !== null || selectedSkills.size === 0 || selectedReqIds.size === 0}
+                className="border-emerald-300 text-emerald-800 hover:bg-emerald-100"
+              >
+                {submitting === 'generate'
+                  ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</>
+                  : <><FlaskConical className="h-3.5 w-3.5" /> Regenerate</>
+                }
+              </Button>
+              <Button asChild size="sm">
+                <Link to={`/tests/${testSuiteRef.test_suite_id}`}>View Test Suite →</Link>
+              </Button>
+            </div>
           </div>
         )}
 
