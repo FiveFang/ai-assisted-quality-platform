@@ -3,7 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import useSWR from 'swr'
 import {
   Loader2, AlertTriangle, CheckCircle2, XCircle, ChevronLeft,
-  History, FlaskConical, Shield, Layers, GitBranch, Database, BarChart2, Ban,
+  History, FlaskConical, Shield, Layers, GitBranch, Database, Ban,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -326,6 +326,57 @@ export function RAAReviewPage() {
     { shouldRetryOnError: false, onErrorRetry: () => {} },
   )
 
+  // Recompute the same 4-factor breakdown used by ConfidenceScorerSkill on the backend.
+  const confidenceBreakdown = useMemo(() => {
+    if (!data) return null
+    const reqs = data.requirements
+
+    // Factor 1 — source completeness (weight 0.25)
+    // What: fraction of expected fields present across all requirements.
+    const requiredFields = ['requirement_id', 'type', 'title', 'description', 'acceptance_criteria']
+    const sourceCompleteness = reqs.length === 0 ? 0 :
+      reqs.reduce((sum, r) => {
+        const has = requiredFields.filter((f) => {
+          const v = (r as unknown as Record<string, unknown>)[f]
+          return v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && v.length === 0)
+        }).length
+        return sum + has / requiredFields.length
+      }, 0) / reqs.length
+
+    // Factor 2 — entity coverage (weight 0.25)
+    // What: how many requirements reference at least one extracted entity by name.
+    const entityNames = new Set(data.entities.map((e) => e.name.toLowerCase()))
+    let entityCoverage = 0.5 // neutral — no entities expected for simple requirements
+    if (entityNames.size > 0) {
+      let refs = 0, covered = 0
+      for (const req of reqs) {
+        const hay = (req.description + ' ' + req.tags.join(' ')).toLowerCase()
+        for (const name of entityNames) {
+          if (hay.includes(name)) { refs++; covered++; break }
+        }
+      }
+      entityCoverage = covered / Math.max(refs, 1)
+    }
+
+    // Factor 3 — rule coverage (weight 0.30)
+    // What: business rules found relative to acceptance criteria count (expect ~1 rule per 2 criteria).
+    const totalCriteria = reqs.reduce((s, r) => s + r.acceptance_criteria.length, 0)
+    const ruleCoverage = totalCriteria === 0 ? 0.5 :
+      Math.min(data.business_rules.length / Math.max(totalCriteria / 2, 1), 1.0)
+
+    // Factor 4 — ambiguity health (weight 0.20)
+    // What: 1.0 minus cumulative penalty from MEDIUM/HIGH/BLOCKING ambiguities.
+    let penalty = 0
+    for (const a of data.ambiguities) {
+      if (a.severity === 'BLOCKING') penalty += 0.3
+      else if (a.severity === 'HIGH') penalty += 0.1
+      else if (a.severity === 'MEDIUM') penalty += 0.05
+    }
+    const ambiguityHealth = Math.max(1.0 - penalty, 0)
+
+    return { sourceCompleteness, entityCoverage, ruleCoverage, ambiguityHealth }
+  }, [data])
+
   const nonRejectedReqs = useMemo(() => {
     if (!data) return []
     const rejected = new Set(Object.keys(data.rejected_requirements ?? {}))
@@ -630,16 +681,81 @@ export function RAAReviewPage() {
         </SkillPanel>
 
         <SkillPanel skillName="ConfidenceScorerSkill" label="Confidence Score">
-          <div className="flex items-center gap-4">
-            <ConfidenceBadge score={data.metadata.confidence_score} showBar />
-            <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
-              <BarChart2 className="h-4 w-4" />
-              {data.metadata.confidence_score >= 0.8
-                ? 'High confidence — extraction is reliable.'
-                : data.metadata.confidence_score >= 0.65
-                  ? 'Moderate confidence — review ambiguities carefully.'
-                  : 'Low confidence — manual review strongly recommended.'}
+          <div className="space-y-4">
+            {/* Overall */}
+            <div className="flex items-center gap-3">
+              <ConfidenceBadge score={data.metadata.confidence_score} showBar />
+              <span className="text-sm text-muted-foreground">
+                {data.metadata.confidence_score >= 0.8
+                  ? 'High — extraction is reliable.'
+                  : data.metadata.confidence_score >= 0.65
+                    ? 'Moderate — review ambiguities carefully.'
+                    : 'Low — manual review strongly recommended.'}
+              </span>
             </div>
+
+            {/* Factor breakdown */}
+            {confidenceBreakdown && (() => {
+              const factors = [
+                {
+                  label: 'Source completeness',
+                  score: confidenceBreakdown.sourceCompleteness,
+                  weight: 0.25,
+                  description: 'Fraction of expected fields (id, type, title, description, acceptance criteria) present across all extracted requirements.',
+                },
+                {
+                  label: 'Entity coverage',
+                  score: confidenceBreakdown.entityCoverage,
+                  weight: 0.25,
+                  description: 'How many requirements reference at least one extracted entity by name. Neutral (50%) when no entities were found.',
+                },
+                {
+                  label: 'Rule coverage',
+                  score: confidenceBreakdown.ruleCoverage,
+                  weight: 0.30,
+                  description: `Business rules extracted vs expected (≈1 rule per 2 acceptance criteria). ${data.business_rules.length} rules found across ${data.requirements.reduce((s, r) => s + r.acceptance_criteria.length, 0)} criteria.`,
+                },
+                {
+                  label: 'Ambiguity health',
+                  score: confidenceBreakdown.ambiguityHealth,
+                  weight: 0.20,
+                  description: `Starts at 100% and loses points per ambiguity: −30% BLOCKING, −10% HIGH, −5% MEDIUM. ${data.ambiguities.length} ambiguit${data.ambiguities.length === 1 ? 'y' : 'ies'} detected.`,
+                },
+              ]
+              return (
+                <div className="rounded-xl border bg-background divide-y">
+                  {factors.map((f) => {
+                    const contribution = f.score * f.weight
+                    const pct = Math.round(f.score * 100)
+                    const barColor = pct >= 80 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-400' : 'bg-red-400'
+                    return (
+                      <div key={f.label} className="px-4 py-3 space-y-1.5">
+                        <div className="flex items-center justify-between gap-4">
+                          <span className="text-xs font-medium">{f.label}</span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <div className="h-1.5 w-20 rounded-full bg-muted overflow-hidden">
+                              <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className="text-xs tabular-nums w-7 text-right">{pct}%</span>
+                            <span className="text-[10px] text-muted-foreground w-8">×{f.weight}</span>
+                            <span className="text-xs font-medium tabular-nums w-10 text-right">
+                              +{Math.round(contribution * 100)}pt
+                            </span>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">{f.description}</p>
+                      </div>
+                    )
+                  })}
+                  <div className="px-4 py-2.5 flex items-center justify-between bg-muted/30">
+                    <span className="text-[11px] text-muted-foreground">Weighted total</span>
+                    <span className="text-xs font-semibold tabular-nums">
+                      {Math.round(data.metadata.confidence_score * 100)}%
+                    </span>
+                  </div>
+                </div>
+              )
+            })()}
           </div>
         </SkillPanel>
 
