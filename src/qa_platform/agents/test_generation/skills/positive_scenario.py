@@ -62,7 +62,7 @@ class PositiveScenarioSkill:
                 ),
             }],
             tier=ModelTier.BALANCED,
-            max_tokens=8192,
+            max_tokens=32768,
         )
         cases = result.get("test_cases", [])
         logger.info("positive_scenario.complete", test_count=len(cases))

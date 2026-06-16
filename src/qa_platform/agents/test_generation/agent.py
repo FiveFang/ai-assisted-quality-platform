@@ -100,6 +100,7 @@ class TestGenerationAgent:
         # competition between groups; within each group the semaphore still applies).
         # Each group is wrapped individually so a failure doesn't discard other groups' output.
         raw_cases: list[dict[str, Any]] = []
+        skill_errors: list[str] = []
 
         if run_functional:
             try:
@@ -108,6 +109,7 @@ class TestGenerationAgent:
                 log.info("tga.functional.done", count=len(cases))
             except Exception as exc:
                 log.warning("tga.functional.failed", error=str(exc))
+                skill_errors.append(f"functional: {exc}")
 
         if run_api:
             try:
@@ -116,6 +118,7 @@ class TestGenerationAgent:
                 log.info("tga.api.done", count=len(cases))
             except Exception as exc:
                 log.warning("tga.api.failed", error=str(exc))
+                skill_errors.append(f"api: {exc}")
 
         if run_security:
             try:
@@ -124,6 +127,7 @@ class TestGenerationAgent:
                 log.info("tga.security.done", count=len(cases))
             except Exception as exc:
                 log.warning("tga.security.failed", error=str(exc))
+                skill_errors.append(f"security: {exc}")
 
         if run_ui:
             try:
@@ -132,6 +136,7 @@ class TestGenerationAgent:
                 log.info("tga.ui.done", count=len(cases))
             except Exception as exc:
                 log.warning("tga.ui.failed", error=str(exc))
+                skill_errors.append(f"ui: {exc}")
 
         log.info("tga.generation.complete", raw_count=len(raw_cases))
 
@@ -171,7 +176,7 @@ class TestGenerationAgent:
 
         # Step 7 — build TestSuite with review gate
         human_review_required, review_reasons = self._evaluate_review_gate(
-            normalized, test_cases
+            normalized, test_cases, skill_errors
         )
 
         by_type = dict(Counter(tc.type for tc in test_cases))
@@ -205,11 +210,15 @@ class TestGenerationAgent:
         self,
         normalized: NormalizedRequirement,
         test_cases: list[TestCase],
+        skill_errors: list[str] | None = None,
     ) -> tuple[bool, list[str]]:
         reasons: list[str] = []
 
         if normalized.metadata.confidence_score < settings.min_confidence_for_auto_proceed:
             reasons.append("Source requirement confidence below threshold")
+        if skill_errors:
+            for err in skill_errors:
+                reasons.append(f"Skill error — {err}")
         if not test_cases:
             reasons.append("No test cases generated — likely requires manual investigation")
 
