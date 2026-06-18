@@ -1,0 +1,32 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: qa_platform
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d qa_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      # Override DATABASE_URL so it points to the db container, not localhost
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/qa_platform
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

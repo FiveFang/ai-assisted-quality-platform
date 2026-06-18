@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from .routes import meta, requirements, tests
@@ -54,3 +57,10 @@ async def startup() -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# Serve the pre-built React frontend when running in Docker / production.
+# Must come AFTER all API routes so /api/v1/... is never shadowed.
+_frontend_dist = os.environ.get("FRONTEND_DIST_DIR", "frontend/dist")
+if os.path.isdir(_frontend_dist):
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="static")

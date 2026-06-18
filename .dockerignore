@@ -1,0 +1,22 @@
+.git
+.env
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Frontend build artefacts and deps (Stage 1 rebuilds from source)
+frontend/node_modules
+frontend/dist
+
+# Dev / docs
+tests/
+*.md
+DESIGN.md
+UI_DESIGN.md

@@ -587,7 +587,7 @@ export function RAAReviewPage() {
       <div className="space-y-2">
         <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground px-1">Agent output</p>
 
-        <SkillPanel skillName="RequirementExtractorSkill" label="Extracted Requirements" count={data.requirements.length} defaultOpen>
+        <SkillPanel skillName="RequirementExtractorSkill" label="Extracted Requirements" description="Parses raw input into structured functional, performance, and non-functional requirements" count={data.requirements.length} defaultOpen>
           {rejectedCount > 0 && (
             <p className="text-xs text-muted-foreground flex items-center gap-1.5 pb-1">
               <Ban className="h-3 w-3 text-destructive/60 shrink-0" />
@@ -612,6 +612,7 @@ export function RAAReviewPage() {
         <SkillPanel
           skillName="AmbiguityDetectorSkill"
           label="Ambiguities"
+          description="Flags unclear, conflicting, or underspecified language that needs human resolution before testing"
           count={data.ambiguities.length}
           defaultOpen={data.ambiguities.length > 0 || failedSkillClasses.has('AmbiguityDetectorSkill')}
           onRetry={failedSkillClasses.has('AmbiguityDetectorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['AmbiguityDetectorSkill']) : undefined}
@@ -638,6 +639,7 @@ export function RAAReviewPage() {
         <SkillPanel
           skillName="WorkflowExtractorSkill"
           label="Workflows"
+          description="Maps multi-step user journeys and process flows described across the requirements"
           count={data.workflows.length}
           defaultOpen={failedSkillClasses.has('WorkflowExtractorSkill')}
           onRetry={failedSkillClasses.has('WorkflowExtractorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['WorkflowExtractorSkill']) : undefined}
@@ -653,7 +655,7 @@ export function RAAReviewPage() {
           }
         </SkillPanel>
 
-        <SkillPanel skillName="EntityExtractorSkill" label="Entities" count={data.entities.length}>
+        <SkillPanel skillName="EntityExtractorSkill" label="Entities" description="Identifies key domain objects — users, data models, services — referenced in the requirement text" count={data.entities.length}>
           {data.entities.length === 0
             ? <p className="text-sm text-muted-foreground">No entities extracted.</p>
             : <div className="grid grid-cols-2 gap-2">
@@ -665,6 +667,7 @@ export function RAAReviewPage() {
         <SkillPanel
           skillName="RuleExtractorSkill"
           label="Business Rules"
+          description="Extracts validation constraints and business logic implicit in the requirement text"
           count={data.business_rules.length}
           defaultOpen={failedSkillClasses.has('RuleExtractorSkill')}
           onRetry={failedSkillClasses.has('RuleExtractorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['RuleExtractorSkill']) : undefined}
@@ -680,7 +683,7 @@ export function RAAReviewPage() {
           }
         </SkillPanel>
 
-        <SkillPanel skillName="ConfidenceScorerSkill" label="Confidence Score">
+        <SkillPanel skillName="ConfidenceScorerSkill" label="Confidence Score" description="Scores extraction quality across 4 weighted factors to indicate how reliably the output can be trusted">
           <div className="space-y-4">
             {/* Overall */}
             <div className="flex items-center gap-3">
@@ -762,6 +765,7 @@ export function RAAReviewPage() {
         <SkillPanel
           skillName="RAGEnricherSkill"
           label="RAG Context"
+          description="Retrieves similar past requirements from the vector store to provide historical grounding during extraction"
           count={data.enriched_context.is_available ? data.enriched_context.similar_requirements.length : undefined}
         >
           {!data.enriched_context.is_available ? (
