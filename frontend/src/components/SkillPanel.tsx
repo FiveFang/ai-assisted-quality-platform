@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils'
 interface Props {
   skillName: string
   label: string
+  description?: string
   count?: number
   defaultOpen?: boolean
   children: ReactNode
@@ -14,7 +15,7 @@ interface Props {
   retrying?: boolean
 }
 
-export function SkillPanel({ skillName, label, count, defaultOpen = false, children, onRetry, retrying }: Props) {
+export function SkillPanel({ skillName, label, description, count, defaultOpen = false, children, onRetry, retrying }: Props) {
   const [open, setOpen] = useState(defaultOpen)
 
   return (
@@ -33,12 +34,19 @@ export function SkillPanel({ skillName, label, count, defaultOpen = false, child
             <span className="shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] text-primary ring-1 ring-primary/20">
               {skillName.replace('Skill', '')}
             </span>
-            <span className="font-medium text-foreground truncate">{label}</span>
-            {count !== undefined && (
-              <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground tabular-nums">
-                {count}
-              </span>
-            )}
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-foreground truncate">{label}</span>
+                {count !== undefined && (
+                  <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground tabular-nums">
+                    {count}
+                  </span>
+                )}
+              </div>
+              {description && (
+                <p className="text-[11px] text-muted-foreground truncate mt-0.5">{description}</p>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {onRetry && (

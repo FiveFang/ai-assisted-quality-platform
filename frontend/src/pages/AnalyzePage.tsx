@@ -8,8 +8,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
+import useSWR from 'swr'
 import { api, fetcher } from '@/api/client'
-import type { AnalysisProgress } from '@/types/api'
+import type { AnalysisProgress, ModelsResponse } from '@/types/api'
 
 /* ─── Draft persistence ────────────────────────────────────────────── */
 
@@ -52,6 +53,7 @@ const schema = z.object({
   jira: z.string().optional(),
   openapi: z.string().optional(),
   max_tokens: z.number().int().positive().optional(),
+  model: z.string().optional(),
 }).refine(
   (d) => d.prd || d.jira || d.openapi,
   { message: 'Provide at least one input (PRD, Jira, or OpenAPI)', path: ['prd'] },
@@ -208,6 +210,8 @@ export function AnalyzePage() {
   const [jobId, setJobId] = useState<string | null>(null)
   const [progress, setProgress] = useState<AnalysisProgress | null>(null)
   const [draftRestored, setDraftRestored] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
 
   const {
     register,
@@ -219,6 +223,10 @@ export function AnalyzePage() {
   } = useForm<FormValues>({ resolver: zodResolver(schema) })
 
   const maxTokens = watch('max_tokens')
+  const model = watch('model')
+
+  // Models the server can actually serve (only providers with keys configured)
+  const { data: modelsData } = useSWR<ModelsResponse>('/models', fetcher)
 
   // Restore draft on mount
   useEffect(() => {
@@ -252,11 +260,20 @@ export function AnalyzePage() {
     return () => { cancelled = true; clearInterval(interval) }
   }, [isSubmitting, jobId])
 
+  const handleCancel = async () => {
+    setCancelling(true)
+    if (jobId) { try { await api.cancelJob(jobId) } catch { /* ignore */ } }
+    abortRef.current?.abort()
+  }
+
   const onSubmit = async (values: FormValues) => {
     setError(null)
     setProgress(null)
+    setCancelling(false)
     const id = crypto.randomUUID()
     setJobId(id)
+    const controller = new AbortController()
+    abortRef.current = controller
 
     const raw_inputs: Record<string, string> = {}
     if (values.prd)     raw_inputs.prd = values.prd
@@ -271,11 +288,22 @@ export function AnalyzePage() {
         raw_inputs,
         job_id: id,
         ...(values.max_tokens ? { max_tokens: values.max_tokens } : {}),
-      })
+        ...(values.model ? { model: values.model } : {}),
+      }, controller.signal)
       clearDraft()
       navigate(`/requirements/${result.requirement_id}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Analysis failed')
+      // Aborted locally, or the server returned 499 — both mean "cancelled by user"
+      const aborted = err instanceof DOMException && err.name === 'AbortError'
+      const cancelled499 = err instanceof Error && err.message.toLowerCase().includes('cancelled')
+      if (aborted || cancelled499) {
+        setError('Analysis cancelled.')
+      } else {
+        setError(err instanceof Error ? err.message : 'Analysis failed')
+      }
+    } finally {
+      setCancelling(false)
+      abortRef.current = null
     }
   }
 
@@ -384,19 +412,85 @@ export function AnalyzePage() {
             {maxTokens && maxTokens > 32768 && (
               <p className="text-xs text-amber-600">High token limits increase cost and latency significantly.</p>
             )}
+
+            {modelsData && modelsData.options.length > 0 && (
+              <div className="space-y-2 pt-3 border-t">
+                <p className="text-xs text-muted-foreground">
+                  Model — defaults to per-step routing (fast models for parsing, powerful for extraction).
+                  Pick one to force the entire analysis onto a specific model.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setValue('model', undefined)}
+                    className={[
+                      'rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
+                      !model
+                        ? 'border-primary bg-primary text-primary-foreground'
+                        : 'border-input bg-background hover:bg-muted',
+                    ].join(' ')}
+                  >
+                    Default
+                  </button>
+                  {modelsData.options.map((opt) => (
+                    <button
+                      key={opt.spec}
+                      type="button"
+                      onClick={() => setValue('model', model === opt.spec ? undefined : opt.spec)}
+                      className={[
+                        'rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
+                        model === opt.spec
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-input bg-background hover:bg-muted',
+                      ].join(' ')}
+                      title={opt.spec}
+                    >
+                      {opt.model_id}
+                      <span className={[
+                        'ml-1.5 text-[10px]',
+                        model === opt.spec ? 'text-primary-foreground/70' : 'text-muted-foreground',
+                      ].join(' ')}>
+                        {opt.provider}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </InputSection>
 
-        {/* Error */}
+        {/* Error / cancellation notice */}
         {error && (
-          <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3.5">
-            <p className="text-sm font-medium text-destructive mb-0.5">Analysis failed</p>
-            <p className="text-xs text-destructive/80 break-words">{error}</p>
-          </div>
+          error === 'Analysis cancelled.' ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+              <p className="text-sm text-amber-800">Analysis cancelled. Your inputs are saved — adjust and run again.</p>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3.5">
+              <p className="text-sm font-medium text-destructive mb-0.5">Analysis failed</p>
+              <p className="text-xs text-destructive/80 break-words">{error}</p>
+            </div>
+          )
         )}
 
-        {/* Submit */}
-        <div className="flex justify-end pt-1">
+        {/* Submit / Cancel */}
+        <div className="flex justify-end gap-2 pt-1">
+          {isSubmitting && (
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              onClick={handleCancel}
+              disabled={cancelling}
+              className="border-destructive/30 text-destructive hover:bg-destructive/5"
+            >
+              {cancelling
+                ? <><Loader2 className="h-4 w-4 animate-spin" /> Cancelling…</>
+                : <><XCircle className="h-4 w-4" /> Cancel</>
+              }
+            </Button>
+          )}
           <Button type="submit" disabled={isSubmitting} size="lg" className="min-w-36">
             {isSubmitting
               ? <><Loader2 className="h-4 w-4 animate-spin" /> Analyzing…</>

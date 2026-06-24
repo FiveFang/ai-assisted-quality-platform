@@ -4,14 +4,23 @@ import asyncio
 import time
 from typing import Any
 
-import anthropic
 import structlog
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...agents.requirement_analysis.agent import RequirementAnalysisAgent
+from ...infrastructure import job_registry
+from ...infrastructure.llm_client import use_model
+from ...infrastructure.llm_errors import (
+    LLMAuthError,
+    LLMBadRequestError,
+    LLMError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
 from ...infrastructure.review_store import review_store
 from ...infrastructure.state_store import state_store
+from .meta import resolve_model_override
 from ...schemas.common import ProcessingStatus
 from ...schemas.requirements import NormalizedRequirement, RequirementSource
 
@@ -28,6 +37,7 @@ class AnalyzeRequest(BaseModel):
     raw_inputs: dict[str, Any]
     job_id: str | None = None
     max_tokens: int | None = None
+    model: str | None = None  # "provider:model_id" override; None = tier-based routing
 
 
 class ReviewSignal(BaseModel):
@@ -100,6 +110,9 @@ async def analyze_requirements(request: AnalyzeRequest) -> NormalizedRequirement
         url=request.url,
     )
 
+    # Validate the optional model override up front (400 if key/SDK missing)
+    model_override = resolve_model_override(request.model)
+
     job_id = request.job_id
     start_time = time.monotonic()
 
@@ -112,29 +125,42 @@ async def analyze_requirements(request: AnalyzeRequest) -> NormalizedRequirement
                 "status": "running",
             })
 
+    if job_id:
+        job_registry.register(job_id, asyncio.current_task())  # type: ignore[arg-type]
+
     try:
-        result = await _raa.process(
-            source=source,
-            raw_inputs=request.raw_inputs,
-            on_progress=_on_progress,
-            max_tokens=request.max_tokens,
-        )
-    except anthropic.AuthenticationError:
+        with use_model(model_override):
+            result = await _raa.process(
+                source=source,
+                raw_inputs=request.raw_inputs,
+                on_progress=_on_progress,
+                max_tokens=request.max_tokens,
+            )
+    except asyncio.CancelledError:
+        if job_id:
+            await state_store.set(f"analysis_progress:{job_id}", {"status": "cancelled", "error": "Cancelled by user"})
+        raise HTTPException(status_code=499, detail="Analysis cancelled by user")
+    except LLMAuthError as exc:
         if job_id:
             await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": "API key invalid"})
-        raise HTTPException(status_code=500, detail="Anthropic API key is invalid or missing.")
-    except anthropic.BadRequestError as exc:
+        raise HTTPException(status_code=500, detail=f"{(exc.provider or 'LLM').title()} API key is invalid or missing.")
+    except LLMBadRequestError as exc:
         if job_id:
             await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": exc.message})
         raise HTTPException(status_code=400, detail=f"AI API error: {exc.message}")
-    except anthropic.RateLimitError:
+    except LLMRateLimitError:
         if job_id:
             await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": "Rate limit hit"})
-        raise HTTPException(status_code=429, detail="Anthropic API rate limit hit — please try again in a moment.")
-    except anthropic.APIStatusError as exc:
+        raise HTTPException(status_code=429, detail="LLM API rate limit hit — please try again in a moment.")
+    except LLMTimeoutError as exc:
+        if job_id:
+            await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": "Request timed out"})
+        raise HTTPException(status_code=504, detail=f"LLM request timed out: {exc.message}")
+    except LLMError as exc:
         if job_id:
             await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": exc.message})
-        raise HTTPException(status_code=500, detail=f"Anthropic API returned an error ({exc.status_code}): {exc.message}")
+        status = exc.status_code or "unknown"
+        raise HTTPException(status_code=502, detail=f"{(exc.provider or 'LLM').title()} API error ({status}): {exc.message}")
     except ValueError as exc:
         if job_id:
             await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": str(exc)})
@@ -144,6 +170,9 @@ async def analyze_requirements(request: AnalyzeRequest) -> NormalizedRequirement
         if job_id:
             await state_store.set(f"analysis_progress:{job_id}", {"status": "failed", "error": str(exc)})
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+    finally:
+        if job_id:
+            job_registry.unregister(job_id)
 
     await state_store.set(f"normalized_requirement:{result.requirement_id}", result.model_dump(mode="json"))
     if job_id:
@@ -273,6 +302,33 @@ async def review_requirement(requirement_id: str, signal: ReviewSignal) -> dict[
     )
     logger.info("requirement.review", requirement_id=requirement_id, approved=signal.approved)
     return {"requirement_id": requirement_id, "status": new_status.value}
+
+
+@router.patch("/{requirement_id}/ambiguities/{ambiguity_id}")
+async def dismiss_ambiguity(requirement_id: str, ambiguity_id: str) -> dict[str, str]:
+    """Mark a blocking ambiguity as dismissed (non-blocking) so the requirement can proceed to approval."""
+    data = await state_store.get(f"normalized_requirement:{requirement_id}")
+    if not data:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    ambiguities: list[dict] = data.get("ambiguities", [])
+    for i, amb in enumerate(ambiguities):
+        if amb.get("ambiguity_id") == ambiguity_id:
+            ambiguities[i] = {**amb, "blocking": False}
+            data["ambiguities"] = ambiguities
+            # Recalculate human_review_required based on remaining blockers
+            still_blocking = any(a.get("blocking") for a in ambiguities)
+            if not still_blocking:
+                data["human_review_required"] = False
+                data["review_reasons"] = [
+                    r for r in data.get("review_reasons", [])
+                    if "blocking" not in r.lower() and "ambiguit" not in r.lower()
+                ]
+            await state_store.set(f"normalized_requirement:{requirement_id}", data)
+            logger.info("ambiguity.dismissed", requirement_id=requirement_id, ambiguity_id=ambiguity_id)
+            return {"requirement_id": requirement_id, "ambiguity_id": ambiguity_id, "status": "dismissed"}
+
+    raise HTTPException(status_code=404, detail=f"Ambiguity '{ambiguity_id}' not found")
 
 
 @router.get("/{requirement_id}/review-history", response_model=list[ReviewEvent])

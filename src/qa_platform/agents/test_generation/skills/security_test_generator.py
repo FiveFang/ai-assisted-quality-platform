@@ -10,22 +10,15 @@ from ....infrastructure.llm_client import llm_client
 logger = structlog.get_logger()
 
 _SYSTEM = """\
-You are a security-focused QA engineer. Generate test cases to VERIFY that security defenses
-are correctly implemented. These are defensive tests — assertions that the system correctly
-rejects or handles attack-like inputs, not actual attack tools.
-
-Focus on OWASP Top 10 controls relevant to the requirements:
-- Authentication and authorization controls
-- Input validation (verify rejection of malformed inputs)
-- IDOR / object-level access control
-- Sensitive data exposure checks
-- Rate limiting / brute force protection
-
-Each test case asserts that a defense WORKS, e.g. "verify 401 is returned on expired JWT".
+You are a security QA engineer. Generate security test cases that VERIFY defenses work.
+Focus on OWASP Top 10: authentication, authorization, input validation, IDOR,
+sensitive data exposure, rate limiting, and brute force protection.
+Each test asserts that a security control is in place and correctly rejects the described input.
+Each test case must include the source_requirement_id matching one of the requirement_ids provided.
 Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate security-focused test cases for:
+Generate security test cases for:
 
 Requirements: {requirements}
 API contracts: {api_contracts}
@@ -38,11 +31,10 @@ Respond with JSON:
       "type": "SECURITY",
       "title": "string",
       "description": "string (name the OWASP control being verified)",
+      "source_requirement_id": "string",
       "preconditions": ["string"],
-      "steps": [
-        {{"step_number": 1, "action": "string", "expected_result": "string", "test_data": {{}}}}
-      ],
-      "expected_results": ["string (must describe expected rejection/defense behavior)"],
+      "steps": [{{"step_number": 1, "action": "string", "expected_result": "string", "test_data": {{}}}}],
+      "expected_results": ["string (describe expected rejection/defense behavior)"],
       "assertions": [
         {{
           "description": "string",
@@ -58,10 +50,7 @@ Respond with JSON:
 
 
 class SecurityTestGeneratorSkill:
-    """
-    Generates defensive security test cases verifying OWASP Top 10 controls.
-    Output tests verify that defenses work — not exploit code.
-    """
+    """Generates security test cases in a single LLM call across all requirements."""
 
     async def execute(
         self,
@@ -72,6 +61,7 @@ class SecurityTestGeneratorSkill:
         import json
 
         logger.info("security_test_generator.start")
+
         result = await llm_client.complete_structured(
             system=_SYSTEM,
             messages=[{
@@ -83,7 +73,7 @@ class SecurityTestGeneratorSkill:
                 ),
             }],
             tier=ModelTier.BALANCED,
-            max_tokens=8192,
+            max_tokens=32768,
         )
         cases = result.get("test_cases", [])
         logger.info("security_test_generator.complete", test_count=len(cases))

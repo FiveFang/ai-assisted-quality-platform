@@ -10,23 +10,19 @@ from ....infrastructure.llm_client import llm_client
 logger = structlog.get_logger()
 
 _SYSTEM = """\
-You are a senior QA architect specializing in edge case discovery. Think deeply about system
-behavior at boundaries and under unusual-but-valid conditions. Focus on:
-- Boundary values (min, max, min±1, max±1)
-- Concurrent/parallel operations on the same resource
-- Timezone, locale, and character encoding variations
-- Pagination boundaries and empty result sets
-- Long-running operations and timeout conditions
-- Re-entrancy and idempotency (retry same operation twice)
-
+You are a senior QA architect. Generate edge case test cases for the given requirements.
+Cover: boundary values (min/max/±1), concurrent operations, timezone/locale variations,
+pagination limits, timeout conditions, re-entrancy and idempotency.
+For each requirement produce the 2-3 most important edge cases.
+Each test case must include the source_requirement_id matching one of the requirement_ids provided.
 Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate edge case test cases for:
+Generate edge case tests for:
 
-Requirement: {requirement}
+Requirements: {requirements}
 Business rules: {rules}
-Relevant entities: {entities}
+Entities: {entities}
 
 Respond with JSON:
 {{
@@ -34,11 +30,10 @@ Respond with JSON:
     {{
       "type": "EDGE_CASE",
       "title": "string",
-      "description": "string (include which edge condition this targets)",
+      "description": "string (specify the edge condition being targeted)",
+      "source_requirement_id": "string",
       "preconditions": ["string"],
-      "steps": [
-        {{"step_number": 1, "action": "string", "expected_result": "string", "test_data": {{}}}}
-      ],
+      "steps": [{{"step_number": 1, "action": "string", "expected_result": "string", "test_data": {{}}}}],
       "expected_results": ["string"],
       "test_data": {{}},
       "tags": ["edge-case"]
@@ -48,32 +43,32 @@ Respond with JSON:
 
 
 class EdgeCaseGeneratorSkill:
-    """
-    Generates boundary and unusual-condition test cases.
-    Uses POWERFUL tier — edge cases require deeper reasoning about failure modes.
-    """
+    """Generates edge case test cases in a single LLM call for all requirements."""
 
     async def execute(
         self,
-        requirement: dict[str, Any],
+        requirements: list[dict[str, Any]],
         rules: list[dict[str, Any]],
         entities: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         import json
+
+        if not requirements:
+            return []
 
         result = await llm_client.complete_structured(
             system=_SYSTEM,
             messages=[{
                 "role": "user",
                 "content": _USER.format(
-                    requirement=json.dumps(requirement, indent=2),
+                    requirements=json.dumps(requirements, indent=2),
                     rules=json.dumps(rules, indent=2),
                     entities=json.dumps(entities, indent=2),
                 ),
             }],
-            tier=ModelTier.POWERFUL,
+            tier=ModelTier.BALANCED,
+            max_tokens=32768,
         )
         cases = result.get("test_cases", [])
-        for case in cases:
-            case["source_requirement_id"] = requirement.get("requirement_id", "")
+        logger.info("edge_case_generator.complete", test_count=len(cases))
         return cases

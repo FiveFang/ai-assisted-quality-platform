@@ -11,14 +11,14 @@ logger = structlog.get_logger()
 
 _SYSTEM = """\
 You are a QA engineer specializing in API contract testing.
-For each endpoint, generate: happy path, all documented error codes, auth/authz tests,
-and schema validation tests. Use the request/response schemas to generate precise assertions.
+Generate test cases covering: happy path, documented error codes, auth/authz, schema validation, edge cases.
+Each test case must include precise HTTP details: method, path, headers, body, expected status, and response assertions.
 Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate API test cases for this endpoint:
+Generate API test cases for:
 
-{endpoint}
+Endpoints: {api_contracts}
 
 Respond with JSON:
 {{
@@ -27,6 +27,7 @@ Respond with JSON:
       "type": "API",
       "title": "string",
       "description": "string",
+      "source_requirement_id": "string (endpoint id or empty string if none)",
       "preconditions": ["string"],
       "steps": [
         {{
@@ -52,33 +53,28 @@ Respond with JSON:
 
 
 class APITestGeneratorSkill:
-    """
-    Generates test cases from OpenAPI contracts.
-    Covers: happy path, all documented error codes, auth/authz, schema validation.
-    """
+    """Generates API test cases in a single LLM call across all endpoints."""
 
     async def execute(self, api_contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         import json
-        import asyncio
+
+        if not api_contracts:
+            logger.info("api_test_generator.skipped", reason="no endpoints")
+            return []
 
         logger.info("api_test_generator.start", endpoint_count=len(api_contracts))
 
-        tasks = [
-            llm_client.complete_structured(
-                system=_SYSTEM,
-                messages=[{
-                    "role": "user",
-                    "content": _USER.format(endpoint=json.dumps(endpoint, indent=2)),
-                }],
-                tier=ModelTier.BALANCED,
-            )
-            for endpoint in api_contracts
-        ]
-        results = await asyncio.gather(*tasks)
-
-        all_cases: list[dict[str, Any]] = []
-        for result in results:
-            all_cases.extend(result.get("test_cases", []))
-
-        logger.info("api_test_generator.complete", test_count=len(all_cases))
-        return all_cases
+        result = await llm_client.complete_structured(
+            system=_SYSTEM,
+            messages=[{
+                "role": "user",
+                "content": _USER.format(
+                    api_contracts=json.dumps(api_contracts, indent=2),
+                ),
+            }],
+            tier=ModelTier.BALANCED,
+            max_tokens=32768,
+        )
+        cases = result.get("test_cases", [])
+        logger.info("api_test_generator.complete", test_count=len(cases))
+        return cases

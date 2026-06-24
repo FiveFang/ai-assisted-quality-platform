@@ -10,23 +10,17 @@ from ....infrastructure.llm_client import llm_client
 logger = structlog.get_logger()
 
 _SYSTEM = """\
-You are a QA engineer generating negative test cases. Negative tests verify the system correctly
-handles invalid inputs, unauthorized access, state violations, and missing required data.
-Each case must specify the expected error behavior. Respond ONLY with valid JSON."""
+You are a QA engineer. Generate negative test cases for the given requirements.
+Cover: missing required fields, invalid formats, out-of-range values, unauthorized access, state violations.
+For each requirement produce the 2-3 most critical error scenarios.
+Each test case must include the source_requirement_id matching one of the requirement_ids provided.
+Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate negative test cases for this requirement:
+Generate negative test cases for:
 
-Requirement: {requirement}
-
+Requirements: {requirements}
 Business rules: {rules}
-
-Cover these categories:
-- Missing required fields
-- Invalid data types or formats
-- Out-of-range or boundary-violating values
-- Unauthorized access attempts
-- State violations (wrong preconditions)
 
 Respond with JSON:
 {{
@@ -35,11 +29,10 @@ Respond with JSON:
       "type": "NEGATIVE",
       "title": "string",
       "description": "string",
+      "source_requirement_id": "string",
       "preconditions": ["string"],
-      "steps": [
-        {{"step_number": 1, "action": "string", "expected_result": "string", "test_data": {{}}}}
-      ],
-      "expected_results": ["string (must include expected error/rejection behavior)"],
+      "steps": [{{"step_number": 1, "action": "string", "expected_result": "string", "test_data": {{}}}}],
+      "expected_results": ["string (include expected error/rejection behavior)"],
       "test_data": {{}},
       "tags": ["negative"]
     }}
@@ -48,27 +41,30 @@ Respond with JSON:
 
 
 class NegativeScenarioSkill:
-    """Generates invalid-input and error-path test cases for a single requirement."""
+    """Generates negative/error-path test cases in a single LLM call for all requirements."""
 
     async def execute(
         self,
-        requirement: dict[str, Any],
+        requirements: list[dict[str, Any]],
         rules: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         import json
+
+        if not requirements:
+            return []
 
         result = await llm_client.complete_structured(
             system=_SYSTEM,
             messages=[{
                 "role": "user",
                 "content": _USER.format(
-                    requirement=json.dumps(requirement, indent=2),
+                    requirements=json.dumps(requirements, indent=2),
                     rules=json.dumps(rules, indent=2),
                 ),
             }],
             tier=ModelTier.BALANCED,
+            max_tokens=32768,
         )
         cases = result.get("test_cases", [])
-        for case in cases:
-            case["source_requirement_id"] = requirement.get("requirement_id", "")
+        logger.info("negative_scenario.complete", test_count=len(cases))
         return cases

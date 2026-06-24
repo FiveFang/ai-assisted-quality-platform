@@ -10,18 +10,16 @@ from ....infrastructure.llm_client import llm_client
 logger = structlog.get_logger()
 
 _SYSTEM = """\
-You are a QA engineer generating positive test cases. Positive tests verify correct system behavior
-when all preconditions are met and inputs are valid. Each test case must be specific, deterministic,
-and independently executable. Respond ONLY with valid JSON."""
+You are a QA engineer. Generate positive (happy-path) test cases for the given requirements.
+For each requirement produce the 2-3 most important success scenarios.
+Each test case must include the source_requirement_id matching one of the requirement_ids provided.
+Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate positive test cases for this requirement:
+Generate positive test cases for:
 
-Requirement: {requirement}
-
-Business rules to satisfy: {rules}
-
-Generate 2-4 positive test cases covering the main happy paths.
+Requirements: {requirements}
+Business rules: {rules}
 
 Respond with JSON:
 {{
@@ -30,10 +28,9 @@ Respond with JSON:
       "type": "FUNCTIONAL",
       "title": "string",
       "description": "string",
+      "source_requirement_id": "string",
       "preconditions": ["string"],
-      "steps": [
-        {{"step_number": 1, "action": "string", "expected_result": "string", "test_data": {{}}}}
-      ],
+      "steps": [{{"step_number": 1, "action": "string", "expected_result": "string", "test_data": {{}}}}],
       "expected_results": ["string"],
       "test_data": {{}},
       "tags": ["positive", "functional"]
@@ -43,27 +40,30 @@ Respond with JSON:
 
 
 class PositiveScenarioSkill:
-    """Generates valid-input, expected-success test cases for a single requirement."""
+    """Generates positive (happy-path) test cases in a single LLM call for all requirements."""
 
     async def execute(
         self,
-        requirement: dict[str, Any],
+        requirements: list[dict[str, Any]],
         rules: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         import json
+
+        if not requirements:
+            return []
 
         result = await llm_client.complete_structured(
             system=_SYSTEM,
             messages=[{
                 "role": "user",
                 "content": _USER.format(
-                    requirement=json.dumps(requirement, indent=2),
+                    requirements=json.dumps(requirements, indent=2),
                     rules=json.dumps(rules, indent=2),
                 ),
             }],
             tier=ModelTier.BALANCED,
+            max_tokens=32768,
         )
         cases = result.get("test_cases", [])
-        for case in cases:
-            case["source_requirement_id"] = requirement.get("requirement_id", "")
+        logger.info("positive_scenario.complete", test_count=len(cases))
         return cases

@@ -11,15 +11,16 @@ logger = structlog.get_logger()
 
 _SYSTEM = """\
 You are a QA engineer specializing in UI and mobile test automation.
-Map workflow steps to concrete page interactions. Generate Page Object Model stubs.
-For mobile tests use Appium conventions; for web tests use Playwright conventions.
+Generate UI/mobile test cases covering the given workflows and requirements.
+Use data-testid selectors for web (Playwright) and accessibility IDs for mobile (Appium).
+Each test case must include the source_requirement_id matching one of the requirement_ids provided (use the closest relevant one).
 Respond ONLY with valid JSON."""
 
 _USER = """\
-Generate UI/mobile test cases from these workflows:
+Generate UI/mobile test cases for:
 
 Workflows: {workflows}
-Requirements tagged UI/mobile: {ui_requirements}
+Requirements: {ui_requirements}
 
 Respond with JSON:
 {{
@@ -28,11 +29,12 @@ Respond with JSON:
       "type": "UI",
       "title": "string",
       "description": "string",
+      "source_requirement_id": "string",
       "preconditions": ["string"],
       "steps": [
         {{
           "step_number": 1,
-          "action": "string (use data-testid selectors for web, accessibility IDs for mobile)",
+          "action": "string (use data-testid for web, accessibility ID for mobile)",
           "expected_result": "string",
           "test_data": {{}}
         }}
@@ -53,7 +55,7 @@ Respond with JSON:
 
 
 class MobileUIGeneratorSkill:
-    """Generates UI/mobile test cases with Playwright or Appium scaffolds from workflow graphs."""
+    """Generates UI/mobile test cases in a single LLM call across all workflows."""
 
     async def execute(
         self,
@@ -70,6 +72,7 @@ class MobileUIGeneratorSkill:
             return []
 
         logger.info("mobile_ui_generator.start", workflow_count=len(workflows))
+
         result = await llm_client.complete_structured(
             system=_SYSTEM,
             messages=[{
@@ -80,6 +83,7 @@ class MobileUIGeneratorSkill:
                 ),
             }],
             tier=ModelTier.BALANCED,
+            max_tokens=32768,
         )
         cases = result.get("test_cases", [])
         logger.info("mobile_ui_generator.complete", test_count=len(cases))

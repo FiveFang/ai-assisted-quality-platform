@@ -26,10 +26,16 @@ export const api = {
   listRequirements: () =>
     apiFetch<RequirementSummary[]>('/requirements/'),
 
-  analyzeRequirements: (body: AnalyzeRequest) =>
+  analyzeRequirements: (body: AnalyzeRequest, signal?: AbortSignal) =>
     apiFetch<NormalizedRequirement>('/requirements/analyze', {
       method: 'POST',
       body: JSON.stringify(body),
+      signal,
+    }),
+
+  cancelJob: (jobId: string) =>
+    apiFetch<{ job_id: string; status: string }>(`/jobs/${jobId}/cancel`, {
+      method: 'POST',
     }),
 
   getReviewHistory: (requirementId: string) =>
@@ -44,10 +50,32 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ approved, reason }) },
     ),
 
-  generateTests: (requirement_id: string) =>
+  generateTests: (
+    requirement_id: string,
+    opts?: {
+      job_id?: string
+      model?: string
+      signal?: AbortSignal
+      selected_skills?: string[]
+      selected_requirement_ids?: string[]
+    },
+  ) =>
     apiFetch<TestSuite>('/tests/generate', {
       method: 'POST',
-      body: JSON.stringify({ requirement_id }),
+      body: JSON.stringify({
+        requirement_id,
+        ...(opts?.job_id ? { job_id: opts.job_id } : {}),
+        ...(opts?.model ? { model: opts.model } : {}),
+        ...(opts?.selected_skills ? { selected_skills: opts.selected_skills } : {}),
+        ...(opts?.selected_requirement_ids ? { selected_requirement_ids: opts.selected_requirement_ids } : {}),
+      }),
+      signal: opts?.signal,
+    }),
+
+  updateTestCase: (suiteId: string, testId: string, patch: Partial<import('@/types/api').TestCase>) =>
+    apiFetch<import('@/types/api').TestCase>(`/tests/${suiteId}/cases/${testId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
     }),
 
   reviewTestSuite: (id: string, approved: boolean, reason?: string) =>
@@ -60,6 +88,12 @@ export const api = {
     apiFetch<NormalizedRequirement>(
       `/requirements/${requirementId}/rerun/${skillKey}`,
       { method: 'POST' },
+    ),
+
+  dismissAmbiguity: (requirementId: string, ambiguityId: string) =>
+    apiFetch<{ requirement_id: string; ambiguity_id: string; status: string }>(
+      `/requirements/${requirementId}/ambiguities/${ambiguityId}`,
+      { method: 'PATCH' },
     ),
 
   rejectRequirement: (nrId: string, reqId: string, reason?: string) =>

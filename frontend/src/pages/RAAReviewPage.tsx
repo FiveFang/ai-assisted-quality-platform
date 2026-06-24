@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useState, useRef, useMemo, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import useSWR from 'swr'
 import {
   Loader2, AlertTriangle, CheckCircle2, XCircle, ChevronLeft,
-  History, FlaskConical, Shield, Layers, GitBranch, Database, BarChart2, Ban,
+  History, FlaskConical, Shield, Layers, GitBranch, Database, Ban,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -189,17 +189,36 @@ function RequirementItem({ req, isRejected, rejectionReason, onReject, onUnrejec
   )
 }
 
-function AmbiguityItem({ amb }: { amb: Ambiguity }) {
+function AmbiguityItem({ amb, onDismiss }: { amb: Ambiguity; onDismiss?: () => void }) {
+  const [dismissing, setDismissing] = useState(false)
+
+  const handleDismiss = async () => {
+    if (!onDismiss) return
+    setDismissing(true)
+    try { await onDismiss() } finally { setDismissing(false) }
+  }
+
   return (
     <div className={[
       'rounded-xl border p-3.5 space-y-1.5',
       amb.blocking ? 'border-red-200 bg-red-50/60' : 'bg-background',
     ].join(' ')}>
-      <div className="flex items-center gap-2 flex-wrap">
-        <AlertTriangle className={`h-3.5 w-3.5 ${amb.blocking ? 'text-red-500' : 'text-amber-500'}`} />
-        <span className="font-mono text-[11px] text-muted-foreground">{amb.ambiguity_id}</span>
-        <Badge variant={SEVERITY_VARIANT[amb.severity] ?? 'secondary'}>{amb.severity}</Badge>
-        {amb.blocking && <Badge variant="danger">Blocking</Badge>}
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <AlertTriangle className={`h-3.5 w-3.5 ${amb.blocking ? 'text-red-500' : 'text-amber-500'}`} />
+          <span className="font-mono text-[11px] text-muted-foreground">{amb.ambiguity_id}</span>
+          <Badge variant={SEVERITY_VARIANT[amb.severity] ?? 'secondary'}>{amb.severity}</Badge>
+          {amb.blocking && <Badge variant="danger">Blocking</Badge>}
+        </div>
+        {amb.blocking && onDismiss && (
+          <button
+            onClick={handleDismiss}
+            disabled={dismissing}
+            className="shrink-0 text-xs text-muted-foreground hover:text-foreground border rounded px-2 py-0.5 hover:bg-background transition-colors disabled:opacity-50"
+          >
+            {dismissing ? <Loader2 className="h-3 w-3 animate-spin inline" /> : 'Dismiss'}
+          </button>
+        )}
       </div>
       <p className="text-sm">{amb.description}</p>
       <p className="text-xs text-muted-foreground">
@@ -274,7 +293,27 @@ export function RAAReviewPage() {
   const [rejectReason, setRejectReason] = useState('')
   const [submitting, setSubmitting] = useState<'approve' | 'reject' | 'generate' | null>(null)
   const [retrying, setRetrying] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const ALL_SKILLS = ['functional', 'negative', 'edge_case', 'api', 'security', 'ui'] as const
+  const [selectedSkills, setSelectedSkills] = useState<Set<string>>(new Set(ALL_SKILLS))
+  const [selectedReqIds, setSelectedReqIds] = useState<Set<string>>(new Set())
+
+  const toggleSkill = (key: string) =>
+    setSelectedSkills((prev) => {
+      const next = new Set(prev)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
+
+  const toggleReq = (id: string) =>
+    setSelectedReqIds((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  const genAbortRef = useRef<AbortController | null>(null)
+  const genJobRef = useRef<string | null>(null)
 
   const { data, error, isLoading, mutate } = useSWR<NormalizedRequirement>(
     id ? `/requirements/${id}` : null, fetcher,
@@ -286,6 +325,68 @@ export function RAAReviewPage() {
     fetcher,
     { shouldRetryOnError: false, onErrorRetry: () => {} },
   )
+
+  // Recompute the same 4-factor breakdown used by ConfidenceScorerSkill on the backend.
+  const confidenceBreakdown = useMemo(() => {
+    if (!data) return null
+    const reqs = data.requirements
+
+    // Factor 1 — source completeness (weight 0.25)
+    // What: fraction of expected fields present across all requirements.
+    const requiredFields = ['requirement_id', 'type', 'title', 'description', 'acceptance_criteria']
+    const sourceCompleteness = reqs.length === 0 ? 0 :
+      reqs.reduce((sum, r) => {
+        const has = requiredFields.filter((f) => {
+          const v = (r as unknown as Record<string, unknown>)[f]
+          return v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && v.length === 0)
+        }).length
+        return sum + has / requiredFields.length
+      }, 0) / reqs.length
+
+    // Factor 2 — entity coverage (weight 0.25)
+    // What: how many requirements reference at least one extracted entity by name.
+    const entityNames = new Set(data.entities.map((e) => e.name.toLowerCase()))
+    let entityCoverage = 0.5 // neutral — no entities expected for simple requirements
+    if (entityNames.size > 0) {
+      let refs = 0, covered = 0
+      for (const req of reqs) {
+        const hay = (req.description + ' ' + req.tags.join(' ')).toLowerCase()
+        for (const name of entityNames) {
+          if (hay.includes(name)) { refs++; covered++; break }
+        }
+      }
+      entityCoverage = covered / Math.max(refs, 1)
+    }
+
+    // Factor 3 — rule coverage (weight 0.30)
+    // What: business rules found relative to acceptance criteria count (expect ~1 rule per 2 criteria).
+    const totalCriteria = reqs.reduce((s, r) => s + r.acceptance_criteria.length, 0)
+    const ruleCoverage = totalCriteria === 0 ? 0.5 :
+      Math.min(data.business_rules.length / Math.max(totalCriteria / 2, 1), 1.0)
+
+    // Factor 4 — ambiguity health (weight 0.20)
+    // What: 1.0 minus cumulative penalty from MEDIUM/HIGH/BLOCKING ambiguities.
+    let penalty = 0
+    for (const a of data.ambiguities) {
+      if (a.severity === 'BLOCKING') penalty += 0.3
+      else if (a.severity === 'HIGH') penalty += 0.1
+      else if (a.severity === 'MEDIUM') penalty += 0.05
+    }
+    const ambiguityHealth = Math.max(1.0 - penalty, 0)
+
+    return { sourceCompleteness, entityCoverage, ruleCoverage, ambiguityHealth }
+  }, [data])
+
+  const nonRejectedReqs = useMemo(() => {
+    if (!data) return []
+    const rejected = new Set(Object.keys(data.rejected_requirements ?? {}))
+    return data.requirements.filter((r) => !rejected.has(r.requirement_id))
+  }, [data])
+
+  // Initialise requirement selection to all non-rejected whenever the NR loads/changes.
+  useEffect(() => {
+    setSelectedReqIds(new Set(nonRejectedReqs.map((r) => r.requirement_id)))
+  }, [data?.requirement_id])
 
   if (isLoading) {
     return (
@@ -305,14 +406,40 @@ export function RAAReviewPage() {
   const blockingAmbiguities = data.ambiguities.filter((a) => a.blocking)
   const canApprove = blockingAmbiguities.length === 0
 
+  const isCancellation = (err: unknown) =>
+    (err instanceof DOMException && err.name === 'AbortError') ||
+    (err instanceof Error && err.message.toLowerCase().includes('cancelled'))
+
+  const startGenJob = () => {
+    const controller = new AbortController()
+    const jobId = crypto.randomUUID()
+    genAbortRef.current = controller
+    genJobRef.current = jobId
+    return { signal: controller.signal, job_id: jobId }
+  }
+
+  const handleCancelGenerate = async () => {
+    setCancelling(true)
+    if (genJobRef.current) { try { await api.cancelJob(genJobRef.current) } catch { /* ignore */ } }
+    genAbortRef.current?.abort()
+  }
+
   const handleApprove = async () => {
-    setSubmitting('approve'); setActionError(null)
+    setSubmitting('approve'); setActionError(null); setCancelling(false)
     try {
       await api.reviewRequirement(data.requirement_id, true)
       await mutate()
-      const suite = await api.generateTests(data.requirement_id)
+      const job = startGenJob()
+      const suite = await api.generateTests(data.requirement_id, {
+        ...job,
+        selected_skills: selectedSkills.size < ALL_SKILLS.length ? [...selectedSkills] : undefined,
+        selected_requirement_ids: selectedReqIds.size < nonRejectedReqs.length ? [...selectedReqIds] : undefined,
+      })
       navigate(`/tests/${suite.test_suite_id}`)
-    } catch (err) { setActionError(err instanceof Error ? err.message : 'Failed'); setSubmitting(null) }
+    } catch (err) {
+      setActionError(isCancellation(err) ? 'Test generation cancelled.' : (err instanceof Error ? err.message : 'Failed'))
+      setSubmitting(null); setCancelling(false)
+    }
   }
 
   const handleReject = async () => {
@@ -325,11 +452,19 @@ export function RAAReviewPage() {
   }
 
   const handleGenerateTests = async () => {
-    setSubmitting('generate'); setActionError(null)
+    setSubmitting('generate'); setActionError(null); setCancelling(false)
     try {
-      const suite = await api.generateTests(data.requirement_id)
+      const job = startGenJob()
+      const suite = await api.generateTests(data.requirement_id, {
+        ...job,
+        selected_skills: selectedSkills.size < ALL_SKILLS.length ? [...selectedSkills] : undefined,
+        selected_requirement_ids: selectedReqIds.size < nonRejectedReqs.length ? [...selectedReqIds] : undefined,
+      })
       navigate(`/tests/${suite.test_suite_id}`)
-    } catch (err) { setActionError(err instanceof Error ? err.message : 'Failed'); setSubmitting(null) }
+    } catch (err) {
+      setActionError(isCancellation(err) ? 'Test generation cancelled.' : (err instanceof Error ? err.message : 'Failed'))
+      setSubmitting(null); setCancelling(false)
+    }
   }
 
   // Parse which skills failed from review_reasons (e.g. "AmbiguityDetectorSkill failed: ...")
@@ -357,6 +492,15 @@ export function RAAReviewPage() {
 
   const rejectedIds = data.rejected_requirements ?? {}
   const rejectedCount = Object.keys(rejectedIds).length
+
+  const handleDismissAmbiguity = async (ambiguityId: string) => {
+    try {
+      await api.dismissAmbiguity(data.requirement_id, ambiguityId)
+      await mutate()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Dismiss failed')
+    }
+  }
 
   const handleRerunSkill = async (skillKey: string) => {
     if (!data) return
@@ -443,7 +587,7 @@ export function RAAReviewPage() {
       <div className="space-y-2">
         <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground px-1">Agent output</p>
 
-        <SkillPanel skillName="RequirementExtractorSkill" label="Extracted Requirements" count={data.requirements.length} defaultOpen>
+        <SkillPanel skillName="RequirementExtractorSkill" label="Extracted Requirements" description="Parses raw input into structured functional, performance, and non-functional requirements" count={data.requirements.length} defaultOpen>
           {rejectedCount > 0 && (
             <p className="text-xs text-muted-foreground flex items-center gap-1.5 pb-1">
               <Ban className="h-3 w-3 text-destructive/60 shrink-0" />
@@ -468,6 +612,7 @@ export function RAAReviewPage() {
         <SkillPanel
           skillName="AmbiguityDetectorSkill"
           label="Ambiguities"
+          description="Flags unclear, conflicting, or underspecified language that needs human resolution before testing"
           count={data.ambiguities.length}
           defaultOpen={data.ambiguities.length > 0 || failedSkillClasses.has('AmbiguityDetectorSkill')}
           onRetry={failedSkillClasses.has('AmbiguityDetectorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['AmbiguityDetectorSkill']) : undefined}
@@ -481,13 +626,20 @@ export function RAAReviewPage() {
               ? <p className="text-sm text-muted-foreground flex items-center gap-1.5">
                   <CheckCircle2 className="h-4 w-4 text-emerald-500" /> No ambiguities detected.
                 </p>
-              : data.ambiguities.map((a) => <AmbiguityItem key={a.ambiguity_id} amb={a} />)
+              : data.ambiguities.map((a) => (
+                  <AmbiguityItem
+                    key={a.ambiguity_id}
+                    amb={a}
+                    onDismiss={a.blocking ? () => handleDismissAmbiguity(a.ambiguity_id) : undefined}
+                  />
+                ))
           }
         </SkillPanel>
 
         <SkillPanel
           skillName="WorkflowExtractorSkill"
           label="Workflows"
+          description="Maps multi-step user journeys and process flows described across the requirements"
           count={data.workflows.length}
           defaultOpen={failedSkillClasses.has('WorkflowExtractorSkill')}
           onRetry={failedSkillClasses.has('WorkflowExtractorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['WorkflowExtractorSkill']) : undefined}
@@ -503,7 +655,7 @@ export function RAAReviewPage() {
           }
         </SkillPanel>
 
-        <SkillPanel skillName="EntityExtractorSkill" label="Entities" count={data.entities.length}>
+        <SkillPanel skillName="EntityExtractorSkill" label="Entities" description="Identifies key domain objects — users, data models, services — referenced in the requirement text" count={data.entities.length}>
           {data.entities.length === 0
             ? <p className="text-sm text-muted-foreground">No entities extracted.</p>
             : <div className="grid grid-cols-2 gap-2">
@@ -515,6 +667,7 @@ export function RAAReviewPage() {
         <SkillPanel
           skillName="RuleExtractorSkill"
           label="Business Rules"
+          description="Extracts validation constraints and business logic implicit in the requirement text"
           count={data.business_rules.length}
           defaultOpen={failedSkillClasses.has('RuleExtractorSkill')}
           onRetry={failedSkillClasses.has('RuleExtractorSkill') ? () => handleRerunSkill(SKILL_CLASS_TO_KEY['RuleExtractorSkill']) : undefined}
@@ -530,23 +683,89 @@ export function RAAReviewPage() {
           }
         </SkillPanel>
 
-        <SkillPanel skillName="ConfidenceScorerSkill" label="Confidence Score">
-          <div className="flex items-center gap-4">
-            <ConfidenceBadge score={data.metadata.confidence_score} showBar />
-            <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
-              <BarChart2 className="h-4 w-4" />
-              {data.metadata.confidence_score >= 0.8
-                ? 'High confidence — extraction is reliable.'
-                : data.metadata.confidence_score >= 0.65
-                  ? 'Moderate confidence — review ambiguities carefully.'
-                  : 'Low confidence — manual review strongly recommended.'}
+        <SkillPanel skillName="ConfidenceScorerSkill" label="Confidence Score" description="Scores extraction quality across 4 weighted factors to indicate how reliably the output can be trusted">
+          <div className="space-y-4">
+            {/* Overall */}
+            <div className="flex items-center gap-3">
+              <ConfidenceBadge score={data.metadata.confidence_score} showBar />
+              <span className="text-sm text-muted-foreground">
+                {data.metadata.confidence_score >= 0.8
+                  ? 'High — extraction is reliable.'
+                  : data.metadata.confidence_score >= 0.65
+                    ? 'Moderate — review ambiguities carefully.'
+                    : 'Low — manual review strongly recommended.'}
+              </span>
             </div>
+
+            {/* Factor breakdown */}
+            {confidenceBreakdown && (() => {
+              const factors = [
+                {
+                  label: 'Source completeness',
+                  score: confidenceBreakdown.sourceCompleteness,
+                  weight: 0.25,
+                  description: 'Fraction of expected fields (id, type, title, description, acceptance criteria) present across all extracted requirements.',
+                },
+                {
+                  label: 'Entity coverage',
+                  score: confidenceBreakdown.entityCoverage,
+                  weight: 0.25,
+                  description: 'How many requirements reference at least one extracted entity by name. Neutral (50%) when no entities were found.',
+                },
+                {
+                  label: 'Rule coverage',
+                  score: confidenceBreakdown.ruleCoverage,
+                  weight: 0.30,
+                  description: `Business rules extracted vs expected (≈1 rule per 2 acceptance criteria). ${data.business_rules.length} rules found across ${data.requirements.reduce((s, r) => s + r.acceptance_criteria.length, 0)} criteria.`,
+                },
+                {
+                  label: 'Ambiguity health',
+                  score: confidenceBreakdown.ambiguityHealth,
+                  weight: 0.20,
+                  description: `Starts at 100% and loses points per ambiguity: −30% BLOCKING, −10% HIGH, −5% MEDIUM. ${data.ambiguities.length} ambiguit${data.ambiguities.length === 1 ? 'y' : 'ies'} detected.`,
+                },
+              ]
+              return (
+                <div className="rounded-xl border bg-background divide-y">
+                  {factors.map((f) => {
+                    const contribution = f.score * f.weight
+                    const pct = Math.round(f.score * 100)
+                    const barColor = pct >= 80 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-400' : 'bg-red-400'
+                    return (
+                      <div key={f.label} className="px-4 py-3 space-y-1.5">
+                        <div className="flex items-center justify-between gap-4">
+                          <span className="text-xs font-medium">{f.label}</span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <div className="h-1.5 w-20 rounded-full bg-muted overflow-hidden">
+                              <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className="text-xs tabular-nums w-7 text-right">{pct}%</span>
+                            <span className="text-[10px] text-muted-foreground w-8">×{f.weight}</span>
+                            <span className="text-xs font-medium tabular-nums w-10 text-right">
+                              +{Math.round(contribution * 100)}pt
+                            </span>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">{f.description}</p>
+                      </div>
+                    )
+                  })}
+                  <div className="px-4 py-2.5 flex items-center justify-between bg-muted/30">
+                    <span className="text-[11px] text-muted-foreground">Weighted total</span>
+                    <span className="text-xs font-semibold tabular-nums">
+                      {Math.round(data.metadata.confidence_score * 100)}%
+                    </span>
+                  </div>
+                </div>
+              )
+            })()}
           </div>
         </SkillPanel>
 
         <SkillPanel
           skillName="RAGEnricherSkill"
           label="RAG Context"
+          description="Retrieves similar past requirements from the vector store to provide historical grounding during extraction"
           count={data.enriched_context.is_available ? data.enriched_context.similar_requirements.length : undefined}
         >
           {!data.enriched_context.is_available ? (
@@ -589,15 +808,147 @@ export function RAAReviewPage() {
 
       {/* Action panel */}
       <div className="rounded-2xl border bg-card p-5 space-y-4">
+
+        {/* Skill selector */}
+        {(data.status === 'AWAITING_REVIEW' || data.status === 'APPROVED') && submitting === null && (
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Test types to generate</p>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                { key: 'functional', label: 'Functional', sub: 'Happy-path' },
+                { key: 'negative',   label: 'Negative',   sub: 'Error paths' },
+                { key: 'edge_case',  label: 'Edge Cases', sub: 'Boundaries' },
+                { key: 'api',        label: 'API Tests',  sub: 'HTTP contracts' },
+                { key: 'security',   label: 'Security',   sub: 'OWASP checks' },
+                { key: 'ui',         label: 'UI / Mobile', sub: 'Playwright/Appium' },
+              ] as const).map(({ key, label, sub }) => {
+                const checked = selectedSkills.has(key)
+                return (
+                  <label
+                    key={key}
+                    className={[
+                      'flex items-start gap-2.5 rounded-xl border p-3 cursor-pointer transition-colors select-none',
+                      checked ? 'border-primary/40 bg-primary/5' : 'border-border bg-background hover:bg-muted/40',
+                    ].join(' ')}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleSkill(key)}
+                      className="mt-0.5 h-3.5 w-3.5 accent-primary shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium leading-none">{label}</p>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">{sub}</p>
+                    </div>
+                  </label>
+                )
+              })}
+            </div>
+            {selectedSkills.size === 0 && (
+              <p className="text-xs text-destructive">Select at least one test type.</p>
+            )}
+          </div>
+        )}
+
+        {/* Requirement selector */}
+        {(data.status === 'AWAITING_REVIEW' || data.status === 'APPROVED') && submitting === null && nonRejectedReqs.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Requirements ({selectedReqIds.size} / {nonRejectedReqs.length} selected)
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setSelectedReqIds(new Set(nonRejectedReqs.map((r) => r.requirement_id)))}
+                  className="text-xs text-primary hover:underline"
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setSelectedReqIds(new Set())}
+                  className="text-xs text-muted-foreground hover:underline"
+                >
+                  None
+                </button>
+              </div>
+            </div>
+            <div className="space-y-0.5 max-h-44 overflow-y-auto rounded-xl border bg-background p-2">
+              {nonRejectedReqs.map((req) => {
+                const checked = selectedReqIds.has(req.requirement_id)
+                return (
+                  <label
+                    key={req.requirement_id}
+                    className={[
+                      'flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 cursor-pointer transition-colors',
+                      checked ? 'bg-primary/5' : 'hover:bg-muted/40',
+                    ].join(' ')}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleReq(req.requirement_id)}
+                      className="h-3.5 w-3.5 accent-primary shrink-0"
+                    />
+                    <span className="font-mono text-[10px] text-muted-foreground shrink-0 w-24 truncate">
+                      {req.requirement_id}
+                    </span>
+                    <span className="text-xs truncate">{req.title}</span>
+                  </label>
+                )
+              })}
+            </div>
+            {selectedReqIds.size === 0 && (
+              <p className="text-xs text-destructive">Select at least one requirement.</p>
+            )}
+          </div>
+        )}
+
+        {(submitting === 'approve' || submitting === 'generate') && (
+          <div className="flex items-center justify-between rounded-xl border border-primary/20 bg-primary/5 px-4 py-3">
+            <div className="flex items-center gap-2 text-sm text-primary">
+              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+              <span>Generating tests — this can take a minute…</span>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleCancelGenerate}
+              disabled={cancelling}
+              className="border-destructive/30 text-destructive hover:bg-destructive/5 shrink-0"
+            >
+              {cancelling
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Cancelling…</>
+                : <><XCircle className="h-3.5 w-3.5" /> Cancel</>
+              }
+            </Button>
+          </div>
+        )}
+
         {testSuiteRef && (
           <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
             <div className="flex items-center gap-2 text-sm text-emerald-800">
               <FlaskConical className="h-4 w-4" />
               <span className="font-medium">Tests generated for this analysis.</span>
             </div>
-            <Button asChild size="sm">
-              <Link to={`/tests/${testSuiteRef.test_suite_id}`}>View Test Suite →</Link>
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleGenerateTests}
+                disabled={submitting !== null || selectedSkills.size === 0 || selectedReqIds.size === 0}
+                className="border-emerald-300 text-emerald-800 hover:bg-emerald-100"
+              >
+                {submitting === 'generate'
+                  ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</>
+                  : <><FlaskConical className="h-3.5 w-3.5" /> Regenerate</>
+                }
+              </Button>
+              <Button asChild size="sm">
+                <Link to={`/tests/${testSuiteRef.test_suite_id}`}>View Test Suite →</Link>
+              </Button>
+            </div>
           </div>
         )}
 
@@ -622,7 +973,7 @@ export function RAAReviewPage() {
                   {submitting === 'reject' ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
                   Reject
                 </Button>
-                <Button onClick={handleApprove} disabled={!canApprove || submitting !== null}>
+                <Button onClick={handleApprove} disabled={!canApprove || submitting !== null || selectedSkills.size === 0 || selectedReqIds.size === 0}>
                   {submitting === 'approve'
                     ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
                     : <><CheckCircle2 className="h-4 w-4" /> Approve & Generate Tests</>
@@ -636,7 +987,7 @@ export function RAAReviewPage() {
         {data.status === 'APPROVED' && !testSuiteRef && (
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">Approved — no test suite generated yet.</p>
-            <Button onClick={handleGenerateTests} disabled={submitting !== null} size="sm">
+            <Button onClick={handleGenerateTests} disabled={submitting !== null || selectedSkills.size === 0 || selectedReqIds.size === 0} size="sm">
               {submitting === 'generate'
                 ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
                 : <><FlaskConical className="h-4 w-4" /> Generate Tests</>
@@ -652,7 +1003,11 @@ export function RAAReviewPage() {
           </p>
         )}
 
-        {actionError && <p className="text-xs text-destructive">{actionError}</p>}
+        {actionError && (
+          <p className={`text-xs ${actionError.toLowerCase().includes('cancelled') ? 'text-amber-600' : 'text-destructive'}`}>
+            {actionError}
+          </p>
+        )}
       </div>
     </div>
   )
