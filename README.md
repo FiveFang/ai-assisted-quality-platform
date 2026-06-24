@@ -18,7 +18,7 @@ Human review gates sit between and after each agent. Low confidence or blocking 
 - Python 3.11+
 - [PostgreSQL 16+](https://www.postgresql.org/) with [pgvector](https://github.com/pgvector/pgvector) — state persistence and RAG vector search
 - [Temporal](https://temporal.io/) (optional for dev) — durable workflow orchestration
-- Anthropic API key
+- Anthropic or OpenAI or Gemini API key
 
 ---
 
